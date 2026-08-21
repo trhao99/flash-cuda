@@ -1,0 +1,441 @@
+# Hopper / SM90 / FlashAttention-3 reference pack
+
+Validated recipes for distilling FA3 (vLLM `_vllm_fa3_C`, source under
+`reference/vllm-flash-attention/hopper`) into self-contained CUDA+PTX with **no CUTLASS**. Every
+formula below was validated bit-exact vs a CUTLASS oracle or an fp32 CPU reference, or confirmed in
+generated PTX/SASS. This seed is distilled from the project's own `TRACE`/`REPLICATION`/
+`GENERALIZATION` docs + memory; transcript-mining addenda are merged in below.
+
+Deliverable + fitness: `kernels/fa3_fwd.cu` → torch op, evaluated by `python -m bench.eval`
+(correctness vs `_vllm_fa3_C` + fp32 ref, per-config `ratio = FA3_ms/our_ms`). Final status:
+**40/40 correct, geomean ~1.10× FA3** (the hand-written kernel *beats* FA3 on many configs, e.g.
+hd64 1.45×; the one accepted straggler is hd256 causal 0.847×). The hd128-causal standalone
+microbench (`fused_attn.cu`, `ab_fa3.py`) plateaued at ~0.94× — a stricter apples-to-apples number.
+
+Build flag (mandatory): `-gencode arch=compute_90a,code=sm_90a`. Plain `sm_90a` resolves to
+`compute_90` and **ptxas rejects `wgmma`**.
+
+---
+
+## 1. GEMM / tensor cores (wgmma)
+
+**Config traced (worst prefill):** `run_mha_fwd_<90, bf16, kHeadDim=128, kHeadDimV=128,
+Split=false, PagedKVNonTMA=true, softcap=false, PackGQA=true>`. Tile: `kBlockM=128, kBlockN=128`
+(causal/local/paged ⇒ 128, else 160), `MmaPV_is_RS=true`, `IntraWGOverlap=true`, `kStages=2`,
+`ClusterShape=<1,1,1>` (varlen), **2 MMA warpgroups = 256 threads**, `NumProducerThreads=32`.
+
+**QK GEMM (SS):** `SM90_64x128x16_F32BF16BF16_SS` →
+`wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16`, both operands from smem, fp32 accum, K=128
+⇒ **8** k16 steps. TiledMMA AtomLayout `<2,1,1>` (2 WGs stacked in M).
+
+**PV GEMM (RS):** `SM90_64x128x16_F32BF16BF16_RS`, A = P **in registers, K-major** (RS mandates
+`tnspA==Major::K`), B = V **MN-major** in smem, fp32 accum, 8 k16 steps.
+
+**fp8 prefill (native e4m3):** `wgmma.mma_async.m64n128k32.f32.e4m3.e4m3` (~2× bf16 throughput).
+The f32 accumulator layout for the k32 fp8 wgmma is **identical** to the bf16 k16 one, so
+softmax/mask/rescale/epilogue are reused unchanged. fp8 wgmma is **TN-only** (both operands K-major).
+
+**fp32 accumulator fragment (m64nNk16), thread(warp w, lane l) → element:**
+- rows `{16·w + l/4, +8}` (i.e. row and row+8)
+- cols `8·c + 2·(l%4) + {0,1}`, for c-block c
+- registers ordered `[rlo c0, rlo c1, rhi c0, rhi c1]` per c-block.
+
+**RS A-operand (P) register packing (m64n128k16):** lane `l`, warp `w` in WG, `tg=l%4`,
+`group=l/4`, thread row `r0 = wg·64 + w·16 + group`; per k-step `kb`, `k0 = 16·kb + 2·tg`:
+`a0={P[r0][k0],P[r0][k0+1]}`, `a1={P[r0+8][k0],…}`, `a2={P[r0][k0+8],…}`, `a3={P[r0+8][k0+8],…}`
+(low 16 bits = lower k index). **This is exactly the accumulator layout with N→K** — so QK's S,
+after softmax→bf16, drops straight into PV's A operand (the whole point of RS). Worked first try.
+
+**wgmma sync:** `wgmma.fence` / `wgmma.commit_group` / `wgmma.wait_group N` around each MMA group.
+Keeping two groups in flight (`wait_group 1`) enables the intra-WG QK∥PV overlap (see §6).
+
+---
+
+## 2. smem layouts + 128B swizzle
+
+FA3 uses `Layout_K_SW128_Atom<bf16>` = `Swizzle<3,4,3>` over an 8×64 bf16 core, applied to Q/K/V/P.
+
+**Corrected 128B-swizzle store formulas** (empirically reverse-engineered from the TMA-landed
+layout; verified 0/16384 mismatch vs TMA; QK/PV bit-exact). The swizzle XORs the column's bits 3–5
+by the row phase `(row&7)`:
+- **K-major (Q,K):** `off(row,c) = (c>>6)*8192 + row*64 + ((c&63) ^ ((row&7)<<3))`  (c = head-dim 0..127)
+- **MN-major (V):** `off(key,dv) = (dv>>6)*8192 + key*64 + ((dv&63) ^ ((key&7)<<3))`
+- 16-byte (8-bf16) chunks at c≡0 (mod 8) land contiguously (the +i hits bits 0–2, the XOR bits 3–5).
+
+> An earlier formula `swz(o)=o^(((o>>7)&7)<<4)` on the *linear* offset was WRONG — it hid because a
+> test only ever returned on its TMA path. Confirm swizzle formulas by round-trip, not by reading.
+
+**cute ground-truth descriptors (validated vs cute, mismatches=0):**
+- K-major: `off(mn,k) = (k>>6)*8192 + swz(mn*64 + (k&63))`, `swz(o)=o^(((o>>7)&7)<<4)`.
+  `make_gmma_desc<K>`: **LBO=16B, SBO=1024B, base=0, lt=1 (B128)**; per-k-step element start
+  `(kb&3)*16 + (kb>>2)*8192`.
+- MN-major (V): must use FA3's exact `SmemLayoutVt = tile_to_shape(Layout_MN_SW128_Atom,
+  (dv,keys,stages), Step<_2,_1,_3>)` — the `Step` reorder matters (plain tile_to_shape gives a
+  different interleaved layout). `make_gmma_desc<MN>`: **LBO field=1024 (→16384B), SBO field=64
+  (→1024B), lt=B128**; keys-step `kb*1024` elems = `kb*2048` B.
+
+**No-swizzle K-major descriptor (the standalone-GEMM baseline):** layout_type=0, LBO=128B, SBO=256B,
+per-k16-step advance `MN·16·2` bytes; smem element offset
+`(k/16)·MN·16 + (mn/8)·128 + ((k%16)/8)·64 + (mn%8)·8 + (k%8)`.
+
+**fp8 1-byte 128B swizzle (`koff8`):** 128 fp8 = one 128B row; 16-byte chunk swizzled by `row&7`:
+`koff8(row,c) = row*128 + ((c&127) ^ ((row&7)<<4))`. Same physical 128B rows / 8-row atoms as bf16
+⇒ wgmma descriptor byte strides unchanged (`LBO=16, SBO=1024, lt=1`); k32 block step `kb*32` bytes.
+
+**Async-proxy fence (mandatory):** `wgmma` reads smem through the async proxy. After a
+producer-fill mbarrier (even plain STS / cp.async, not just TMA) and **before** the wgmma, issue
+`fence.proxy.async.shared::cta`, or you get an intermittent ~0.1% wrong-element race.
+
+---
+
+## 3. Memory movement (TMA + cp.async)
+
+- **TMA:** host builds a `CUtensorMap` via `cuTensorMapEncodeTiled` (driver API — allowed; link the
+  `libcuda` stub). Load with `cp.async.bulk.tensor.2d…mbarrier::complete_tx::bytes` from a **single
+  producer thread/warp**. `SWIZZLE_128B` requires the box inner ≤128B (256B is rejected) ⇒ split a
+  128-wide contiguous dim into **2 boxes** `{64,128}` at smem 0 / 8192.
+- **Key insight — you never reproduce cute's byte layout.** TMA-write swizzle and wgmma-read swizzle
+  are the *same hardware swizzle*, so they round-trip even though the physical bytes ≠ cute's logical
+  offsets. Make TMA-write and wgmma-read *self-consistent* (for K: {2 boxes at 0/8192} ↔ {descriptor
+  k-step +8192 for kb≥4}); don't chase cute's exact bytes.
+- **Integration recipe (both validated bit-exact):** K-major (Q,K): box `{64,128}`×2, desc
+  LBO=16/SBO=1024/lt=1, k-step `(kb&3)*16+(kb>>2)*8192` elems, trans=0. MN-major (V): box `{64,128}`×2
+  @ dv0=0/64, desc LBO=16384/SBO=1024/lt=1, keys-step `kb*2048`B, **trans-b=1**. In bf16 FA3, V is
+  **not** transposed (`Transpose_V=false`); K and V are the *same* TMA op (both `[rows,HD]`
+  row-major), only the wgmma descriptor (K-major vs MN-major) differs. One `CUtensorMap` over
+  `[BH·S, HD]` serves Q/K/V; pass coords `{x=HD-half·64, y=bh·S+row}`. smem must be `__align__(1024)`.
+- **Paged KV:** FA3's `PagedKVNonTMA` path loads K/V via `cp.async.cg.shared.global.L2::128B` (page
+  size 16/32 ⇒ page%kBlockN≠0 ⇒ TMA-paged disallowed). Q still via TMA. When the page composes with
+  the swizzle (`block_size | CTA_N`, `%8==0`, contiguous rows), a **TMA-paged** loader issues per-page
+  `[block_size,64]` boxes that compose byte-exactly into the 128-row swizzled tile (32 TMA/tile vs
+  2048 cp.async/tile). This was the biggest paged-prefill win.
+- **fp8 loads:** TMA with `UINT8` dtype + 128B swizzle lands exactly `koff8` — this **solved fp8
+  dense 0.84→1.00×** (the cp.async gather was `long_scoreboard`-bound at 2.4 cyc/issue). Also solved
+  fp8 paged decode 0.88→0.95× via per-page `[128,block_size]` boxes.
+- **Standalone GEMM caveat:** for a store-bound standalone GEMM, cp.async loads *regressed* it
+  (113→82 TFLOPS); a float4 LDG→STS load won. TMA matters in the *fused* kernel (load-issue pressure),
+  not the store-bound microbench.
+
+---
+
+## 4. Synchronization / warp specialization / scheduling
+
+- **Warp roles:** 1 producer WG (`setmaxnreg.dec`, **40 regs**) + 2 consumer/MMA WGs
+  (`setmaxnreg.inc`, **232 regs**) = 384 threads, `__launch_bounds__(384,1)`. Exactly FA3's split.
+- **Pipeline:** `PipelineTmaAsyncNoCluster<kStages=2>` (TMA) or `PipelineAsync<2>` (cp.async paged) →
+  `mbarrier.init` / `arrive.expect_tx` / `try_wait.parity` / `arrive`. Producer signals cp.async
+  readiness with `cp.async.mbarrier.arrive.noinc` on a per-stage `full[]` mbarrier (init count = 128
+  producer threads; the deferred arrive flips the barrier when the stage's cp.async complete).
+- **Named-barrier ping-pong** (2 consumer WGs, `bar.sync`/`bar.arrive`, 256 threads): transcribed
+  from `named_barrier.hpp` + `mainloop_fwd_sm90_tma_gmma_ws.hpp`. Kickoff = cwg0 `arrive(self)` in
+  `mma_init`. **NOTE (hard-won): our ping-pong replica never engaged** — see §8.
+- **Persistent tile scheduler:** grid = #SMs, each CTA strides `work += gridDim.x` over `tiles_m·BH`;
+  the K/V smem ring phase is carried **across tiles** (declared outside the work loop) so the pipeline
+  never drains; `get_next_work` called *before* the epilogue. FA3's real scheduler is
+  `VarlenDynamicPersistentTileScheduler` = a global `atomicAdd` work queue (work-stealing) with LPT
+  ordering (biggest causal tiles first). Our **static** persistent replica was neutral-to-worse
+  (static round-robin can't balance causal's triangular load); FA3's win needs the *dynamic* version.
+
+---
+
+## 5. Math / numerics (governs bit-exact output)
+
+- **exp2:** use `ex2.approx.ftz.f32` (bare MUFU.EX2), **NOT** `exp2f`/`expf` — the library call lowers
+  to MUFU.EX2 **plus subnormal guards** (`FSETP.GEU …,-126` + `FMNMX` clamp) on every exponential.
+  softmax args ≤0 ⇒ result ∈(0,1]; `.ftz` flushes far-tail subnormals to 0 (what FA3 does, within bf16
+  tol). This single change cut FMA-pipe 24%→16.5% and issue-active 49.5%→39.3% (matching FA3).
+- **Online softmax:** log2 domain — `P = exp2(S·scale·log2e − m·scale·log2e)`; running max/sum with
+  rescale of O by `exp2(m_old−m_new)`. `LSE = scale·m + ln(l)` (via `__logf`).
+- **Casts:** fp32→bf16 for S→P and O write must be round-nearest-even (`cvt.rn.bf16.f32`).
+- **fp8 descale folding (FA3 semantics):** `q/k/v_descale` are per-(b,kv-head). Since `Q_real=q·qd`,
+  `exp(scale·Q_real·K_real)=exp((scale·qd·kd)·(q_raw·k_raw))` ⇒ fold `qd·kd` into the softmax scale
+  `sc_eff` (also used for LSE); `v_descale` is a constant ⇒ multiply O once at the epilogue
+  (`invvd = inv·vd`). Output bf16.
+- **Tree-reduced max/sum:** split the per-row max (`fmaxf`) and sum (`add`) chains into 4 independent
+  accumulators for ILP — bit-exact (max is order-independent; sum reassoc ≪ bf16 tol).
+
+---
+
+## 6. Fused mainloop structure
+
+Consumer per n-block: `qk_gemm` (SS) → mask → `softmax_stats` (online) → pack P fp32→bf16 (== PV RS
+A-operand, no smem round-trip) → `pv_gemm` (RS) → epilogue. **Intra-WG overlap:** lag PV by one
+n-block so `softmax(nb)` runs while `PV(nb−1)` is in flight (`wgmma.wait_group 1`).
+
+**The P WAR hazard (critical, §8 below):** the next PV's A-operand P must be written **after**
+`wgmma_wait0()` (PV(nb−1) done reading P), else ptxas serializes the pipeline. Correct order:
+```
+wgmma_wait1();  softmax_stats(...);      // softmax overlaps in-flight PV(nb-1); reads s, NOT P
+wgmma_wait0();                            // PV(nb-1) done → no longer reads P
+for i: P[i] = pack_bf16(s[2i], s[2i+1]);  // NOW safe to overwrite P
+```
+
+**Per-head-dim tile sizes FA3 uses** (`tile_size.h`, `{CM, CN, MmaPV_is_RS, IntraWGOverlap}`):
+hd64 `{192,128}`, hd96 `{192,128}`, hd128 causal `{128,128}` / nc `{128,160}`, hd192 causal
+`{128,96}`, hd256 causal `{128,80}`, fp8 hd128 `{128,192}`. **ALL paths `MmaPV_is_RS=true`.**
+smem = `(CM·HD + STAGES·CN·HD + STAGES·CN·HDV)·2` bytes; cap ~227 KB.
+
+---
+
+## 7. Optimization progression (what moved the needle)
+
+Standalone hd128-causal A/B vs FA3 (`ab_fa3.py`): lockstep **0.2×** → cp.async + intra-WG overlap
+(`OVL`) **0.39×** → producer + 2-consumer ping-pong (`WS`) **0.45×** → + intra-WG overlap (`WSO`)
+**0.50×** → TMA + 128B swizzle (`WST`) **0.73×** → drop ping-pong (`NOPP`) **0.77×** → async wgmma
+batches (`SEQB`, fix DEPBAR serialization) **0.88×** → fix P WAR hazard so QK∥PV stays async (`CUTE`)
+**0.91×** → `ex2.approx.ftz` + drop redundant work **0.94×**. Production = `-DWST -DCUTE -DNOPP`.
+The eval-suite deliverable (`fa3_fwd.cu`) additionally has mask-fast-out, TMA fp8, per-head-dim
+tiles, and split-KV decode → geomean **1.10×**.
+
+Levers that mattered: (1) persistent grid + tile scheduler (kills wave-quant), (2) widest aligned
+register→global epilogue store (float2), (3) TMA (cuts producer issue pressure), (4) `ex2.approx.ftz`,
+(5) the P-WAR reorder (keeps 2 wgmma groups async).
+
+---
+
+## 8. Don't-retry (measured dead ends — do NOT repeat)
+
+- **fp8 register-P RS-PV:** validated correct (permute_Aregs shuffle) but **regressed 0.85→0.83** —
+  fp8 prefill is producer/load-bound, not consumer-bound. (The TMA load fix is what worked.)
+- **fp8 deeper cp.async prefetch + STAGES=4:** 0.74 (worse).
+- **hd256:** CN=64/ST=2 (0.63), CN=80/ST=2 = FA3's own config (0.58 — our ring starves at 2 stages),
+  CM=64/CN=64/ST=3 (0.53), inter-WG ping-pong (0.86 neutral), K/V ring split (0.844 neutral),
+  IntraWGOverlap double-P (0.81), CN=80/ST=2 + TMA L2 prefetch-ahead (0.578 — proves ST=2 starvation
+  is NOT load-latency; the 2-stage ring has no slack for the handshake). hd256 is HARD-capped:
+  `CN·STAGES ≤ 163` at CM=128 (Q=64KB of 227KB); CN=48/ST=3 (**0.847**) is the local optimum. The
+  binding constraint at CN>48 is **register pressure** (HDV=256 ⇒ acc_o[128] ⇒ ptxas C7512 wgmma
+  serialization), not the pipeline. Accepted architectural limit.
+- **P-in-smem + double-buffer (DBUF):** dead end on this toolchain. C7511 (register) → C7515
+  (accumulator-define) wgmma serialization; ~28–30% regression. The SS-PV smem round-trip alone costs
+  a flat ~20% vs RS.
+- **Consumer ping-pong (3 sessions to rule out):** our replica is byte-identical to FA3 in SASS but
+  **never alternates** — barrier-stall stays 1.15 (== NOPP) with it on, tensor-util unchanged; it only
+  adds tax (`NOPP` ≥ `PP` always). Seeded clock64 offsets collapse to lockstep. Abandoned.
+- **cp.async on the store-bound standalone GEMM:** 113→82 TFLOPS (exposes load latency, no overlap).
+- **Static persistent scheduler (`WSTP`):** neutral-to-worse for causal (static round-robin can't
+  balance triangular load). Helps small-causal via LPT + cross-tile ring only marginally.
+
+---
+
+## 9. Hypothesis churn — the expensive wrong turns (feed this to perf-hypothesis-verifier)
+
+Each of these was a *confident* conclusion later overturned; together they cost the most time. The
+lesson baked into the skill: **run the GEMM-only-ceiling ablation and PC-sampling BEFORE committing.**
+
+- **§18 "ptxas register-pressure ceiling; cute's uniform-register descriptors are unreachable from
+  hand-written wgmma"** → **WRONG (§19).** It was a plain **WAR hazard on P** (writing the next PV's
+  A-operand while the in-flight PV still read it). Fixed by one reorder (write P after `wait0`).
+  Disproved by: an isolated 2-group inline-asm test was async (DEPBAR 16/1), and growing it to a loop
+  reproduced the serialization → the trigger was the P write, not registers.
+- **§20/§21 "the last 4–6% is per-tile fill/drain; needs a persistent cross-tile rewrite"** →
+  **WRONG (§22).** The **GEMM-only ablation** (`-DABLATE_SM`) showed our GEMM ceiling *exceeds* FA3's
+  full time in every config ⇒ the entire gap is **exposed softmax (~16%)**, not fill/drain (confirmed
+  at S=8192 where fill/drain is ~3% but the tensor gap is 7%).
+- **§25 "FA3's NCU barrier-stall 2.24 = a working consumer ping-pong that hides softmax"** →
+  **WRONG (§26).** **PC-sampling** (`--section SourceCounters --print-source sass`) attributed **77%**
+  of FA3's barrier stalls to a **384-thread barrier** = its **dynamic persistent-scheduler** tile
+  handoff (smem work-info load at `+0x288d0`, `S2UR SR_CgaCtaId`), NOT the 256-thread consumer
+  ping-pong (~3%). The real gap is **`long_scoreboard`** (memory latency, ours 12.2% vs FA3 5.0%),
+  hidden by FA3's resident-producer cross-tile prefetch — a dynamic work-stealing scheduler, not
+  ping-pong and not softmax scheduling.
+
+**Net:** GEMM path already ≥ FA3; residual gap = memory-latency hiding via a dynamic persistent tile
+scheduler (a substantial rewrite whose only cheap static approximations measured 0). Production stays
+`-DWST -DCUTE -DNOPP`, bit-exact, zero CUTLASS.
+
+---
+
+## Key source files (reference)
+- `reference/vllm-flash-attention/hopper/mainloop_fwd_sm90_tma_gmma_ws.hpp` — the mainloop / softmax
+  scheduling / V handling / RS-P convert-after-wait.
+- `.../flash_fwd_kernel_sm90.h` — persistent kernel body + scheduler loop.
+- `.../tile_size.h` — the per-config tile selection.
+- `.../named_barrier.hpp`, `.../sm90_pipeline_no_cluster.hpp` — warp-spec + pipeline.
+- Our oracles: `kernels/ptx_gemm.cu` (QK/PV), `kernels/fp8_probe.cu`, `kernels/mainloop_micro.cu`,
+  the fused variants in the deliverable `kernels/fa3_fwd.cu`.
+
+---
+
+# Appendix A — additional validated detail (transcript-mined)
+
+The sections above are the cheat-sheet. This appendix adds the exact code/encoders, the wgmma
+serialization saga, the CUTLASS→PTX mapping, the full perf progression, and the supersession
+warnings — all mined from the build transcripts (per-line citations live in
+`reference/{claude,cursor}-chats`; `KER:` = `kernels/fa3_fwd.cu`).
+
+## A.1 GMMA smem descriptor — exact bit encoder
+
+```c
+// 64-bit GMMA matrix descriptor. All three offsets stored in 16-byte units (the >>4).
+__device__ __forceinline__ uint64_t make_smem_desc(uint32_t addr, uint32_t lbo, uint32_t sbo, uint32_t lt){
+    uint64_t d = 0;
+    d |= (uint64_t)((addr >> 4) & 0x3FFFu);          // bits [13:0]  matrix start addr
+    d |= (uint64_t)((lbo  >> 4) & 0x3FFFu) << 16;    // bits [29:16] Leading-dim Byte Offset
+    d |= (uint64_t)((sbo  >> 4) & 0x3FFFu) << 32;    // bits [45:32] Stride-dim Byte Offset
+    d |= (uint64_t)(lt & 0x3u) << 62;                // bits [63:62] layout-type
+    return d;                                        // (bits [51:49] = swizzle base_offset, 0 here)
+}
+// layout-type lt: 0 = none/interleave, 1 = 128B swizzle (Swizzle<3,4,3>), 2 = 64B, 3 = 32B.
+```
+Advance the descriptor along K by adding a byte offset to the **low 32 bits** (address lives in
+bits[13:0]) — `desc_add(base, off)`: `mov.b64 {lo,hi},base; add lo,off; mov.b64 r,{lo,hi}`.
+
+**Constants:** bf16 K-major (Q,K): `LBO=16, SBO=1024, lt=1`. bf16 MN-major (V): `LBO=16384,
+SBO=1024, lt=1, trans-b=1`. fp8 (all operands): `LBO=16, SBO=1024, lt=1`. No-swizzle era-1
+(superseded): `LBO=128, SBO=256, lt=0`.
+
+**A-vs-B per-k-step stride asymmetry (subtle):** Q(A) has CTA_M=128 rows but K/V(B) have CN rows, so
+once HD spans >1 64-col block the two descriptors step differently: `qk_doffR<ROWS>(kb) =
+(kb&3)*2 + (kb>>2)*(ROWS*8)` in 16B units — use `<CM>` for A, `<CN>` for B. fp8 is simpler
+(`kb*32` B for QK, `kb*128` for the V box) because a 128-fp8 row is exactly one 128B swizzle row.
+
+## A.2 Host `cuTensorMapEncodeTiled` (exact args)
+
+`#include <cuda.h>`, link `-lcuda`. Dims are **inner-first**; `gstride` has length `rank-1`
+(bytes between rows). Set `cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+smem_bytes)` before first launch.
+
+```c
+// contiguous bf16 KV [total_k, hkv, hd] as [hkv*hd cols, total_k rows], box [64, CN]:
+uint64_t gdim[2]    = {hkv*hd, total_k};
+uint64_t gstride[1] = {t.stride(0) * sizeof(T)};        // bytes per key row
+uint32_t bdim[2]    = {64u, (uint32_t)CN};              // one 64-col swizzle block × CN rows
+uint32_t estride[2] = {1u, 1u};
+cuTensorMapEncodeTiled(&map, tmap_dtype<T>(), 2, ptr, gdim, gstride, bdim, estride,
+    CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+    CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+// tmap_dtype: bf16->BFLOAT16, half->FLOAT16, fp8_e4m3->UINT8.
+// SWIZZLE_128B requires box inner <= 128B => split a 128-wide dim into 2 boxes at smem 0/8192.
+// Packed-GQA Q is 3D: gdim={hd,hq,total_q}, box={64, rep, CM/rep} (needs rep|CM, heads contiguous).
+// fp8 uses a 128-wide box {128, rows} (128 fp8 = one 128B row) => single box fills a hd128 tile.
+```
+
+## A.3 Device mbarrier + TMA PTX helpers + phase accounting
+
+```
+mbarrier.init.shared.b64 [bar], count;                                  // count = # arrivals
+mbarrier.arrive.expect_tx.shared::cta.b64 _, [bar], bytes;              // register pending TMA bytes
+cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes
+        [dst], [map, {x=inner, y=outer}], [bar];                       // single producer thread issues
+mbarrier.try_wait.parity.shared::cta.b64 p, [bar], phase;              // non-blocking, phase parity bit
+mbarrier.arrive.shared::cta.b64 _, [bar];                              // empty-slot release
+cp.async.mbarrier.arrive.noinc.shared::cta.b64 [bar];                  // tie prior cp.async to bar
+```
+Ring: stage `st = li % STAGES`; wait `full[st]` at phase `(li/STAGES)&1`; release `empty[st]`; the
+producer waits `empty[st]` at phase `((li/STAGES)-1)&1` before overwriting. `full[]` init count =
+#arrivals (pages, or 1 contiguous, or NumProd for cp.async); `empty[]` init count = consumer thread
+count. **expect_tx** flips the phase only when all arrivals AND all expected bytes land.
+
+## A.4 fp8 specifics (native e4m3)
+
+- **`koff8(row,c) = (c>>7)*(128*CN) + row*128 + ((c&127) ^ ((row&7)<<4))`** — 128-wide block, `<<4`
+  XOR (16B-granular over a 128B row). Scatter two adjacent keys per `st.shared.u16` at the even off.
+- **RS-P permute (validated but regressed — fp8 is load-bound; kept SS-P for fp8):** QK gives keys
+  `{2tg,2tg+1}`, RS A needs `{4tg..4tg+3}` key-contiguous ⇒ a genuine **quad `__shfl_sync` +
+  `__byte_perm`** fixup (`sel = lane_03 ? 0x5410/0x7632 : 0x1054/0x3276`, `upper_map={0,3,1,2}[tg]`).
+- **fp8 V-transpose (hardware path FA3 uses):** `ldmatrix.sync.aligned.x4.trans.m8n8.shared.b16`
+  (treats fp8 pairs as one 16-bit elem) → `__byte_perm(u,l,0x6420)` / `0x7531` de-interleave →
+  `stmatrix …b16`. (Our kernel used a scalar byte loop; this is the accelerated replacement.)
+- **hd64-fp8:** 128B fp8 swizzle needs 128-fp8-wide rows ⇒ incompatible with HD=64. Fix: allocate
+  the tile **128-wide (HDQK=128)**, load only 64 real cols, contract only over HD=64 (unused half
+  never read). Cracked hd64_fp8_decode 0.297→0.962 with no fp8→bf16 cast.
+
+## A.5 The wgmma serialization saga (C7513/C7519/C7520 → async)
+
+Keeping two wgmma groups in flight (intra-WG overlap) repeatedly serialized (`WARPGROUP.DEPBAR`
+after *every* HGMMA, 32:1 not 12:1). Root causes and fixes, all confirmed in SASS:
+- **P WAR hazard** — write the next PV's A-operand P only *after* `wgmma_wait0()` (see §6). Primary fix.
+- **acc_o hazard (RescaleOBeforeGemm)** — `rescale_o` writes `acc_o` (a PV input); if it runs
+  *between* the QK and PV issues, acc_o is defined mid-pipeline → C7513. Move the O-rescale *before*
+  both issues so nothing defines a wgmma input between them.
+- **`scaleD` predicate** — a *runtime* scaleD register feeding the wgmma predicate is "non-wgmma
+  defines a wgmma input" → C7513. Emit two **compile-time-constant**-predicate wgmma variants
+  (accumulate vs overwrite) instead of a register.
+- **`warpgroup_fence_operand`** — cute wraps the group with an empty `asm volatile("" : "+f"(reg))`
+  on *every* accumulator (and RS A) register before `wgmma.fence` and after the wait, marking them
+  one live unit and preventing per-wgmma `WARPGROUP.ARRIVE` (C7519).
+- **SEQB fallback** — if overlap still serializes, run each WG's `QK(commit+wait0) → softmax →
+  PV(commit+wait0)` **sequentially** (one group in flight): DEPBAR 32→2, and it was *faster* than a
+  serialized overlap (the serialization hurt more than the overlap helped). 0.78→0.90.
+- Descriptor register reuse was a red herring: the descriptor is read at *issue* time, so reusing one
+  UR is safe; the residual per-wgmma DEPBAR is the inherent k-loop accumulator RAW (present in CUTLASS too).
+
+## A.6 CUTLASS-API → raw-PTX mapping (for a no-CUTLASS port)
+
+```
+NamedBarrier::sync/arrive           -> bar.sync / bar.arrive  id, cnt
+warpgroup_reg_alloc/dealloc<N>      -> setmaxnreg.inc/dec.sync.aligned.u32 N   (producer 40 / consumer 232)
+warpgroup_arrive()                  -> wgmma.fence.sync.aligned
+warpgroup_commit_batch()            -> wgmma.commit_group.sync.aligned
+warpgroup_wait<N>()                 -> wgmma.wait_group.sync.aligned N         (N=1 keeps PV in flight)
+warpgroup_fence_operand(reg)        -> empty asm "+f"/"+r"(reg) + "memory"
+cute::gemm (SM90)                   -> wgmma.mma_async.sync.aligned.m64n{N}k{16|32}.f32.{bf16|e4m3}...
+PipelineTmaAsync::producer_acquire  -> mbarrier.arrive.expect_tx (+ wait)
+  ::consumer_wait                   -> mbarrier.try_wait.parity / wait.parity
+  ::consumer_release                -> mbarrier.arrive on empty bar (NoCluster: only WG thread 0)
+TMA load w/ barrier                 -> cp.async.bulk.tensor...mbarrier::complete_tx::bytes
+flash::cp_async_wait<N>             -> cp.async.wait_group N
+```
+Canonical files: `mainloop_fwd_sm90_tma_gmma_ws.hpp`, `flash_fwd_kernel_sm90.h`, `named_barrier.hpp`,
+`utils.h` (WGMMA wrapper + `warpgroup_fence_operand`), `tile_scheduler.hpp`, `cute/arch/mma_sm90_gmma.hpp`
++ `mma_sm90_desc.hpp`, `cutlass/arch/reg_reconfig.h`.
+
+## A.7 Full A/B perf progression (hd128 bf16 causal, ratio = mine/FA3)
+
+| ratio | change that caused the jump |
+|---|---|
+| 0.20 | v1 lockstep fused (cooperative STS, single-buffer, 2 MMA WGs lockstep) — correct, no overlap |
+| 0.37–0.41 | cp.async V + **trans-b=1** (MN-major V, no manual transpose) |
+| 0.45 | producer warpgroup + named-barrier ping-pong (WS) |
+| 0.50–0.52 | + intra-WG PV-lag overlap (WSO, 3-stage ring); 1 CTA/SM = same occupancy as FA3 |
+| ~0.68 | **TMA + 128B swizzle** for K/V (1 issue/tile vs ~4096 cp.async; L2 promotion) |
+| 0.77–0.78 | WST (warp-spec + TMA) — but wgmma **serialized** (DEPBAR 32); GEMM-only already beat FA3 ⇒ gap = exposed softmax |
+| 0.90 | **SEQB** (sequential async wgmma batches; DEPBAR 32→2) |
+| ~0.91 | intra-WG QK∥PV genuinely async (P-WAR + RescaleOBeforeGemm fixes) |
+| 0.93–0.96 | **`ex2.approx.ftz.f32`** replacing `exp2f` + **NOPP** (drop ping-pong) + drop redundant zeroing |
+
+Production standalone build = `-DWST -DCUTE -DNOPP`. Residual ~4–6% (worst small-causal 2048 @0.85)
+= per-tile fill/drain, needs a dynamic persistent scheduler (static replica was neutral/worse).
+
+## A.8 Features / correctness edge cases
+
+- **Swizzle composition:** only `CN ∈ {48,64,128}` land byte-exact for the contiguous one-box TMA
+  path; **CN=72 and CN=32 corrupt the swizzle → NaN** (why hd192 is CN=64 not 96, hd256 CN=48).
+  Paged `[block_size,64]` boxes only need `block_size | CN` and `block_size % 8 == 0`.
+- **Non-64 head dims (hd96):** pad the smem tile up to the next 64 (`HDsm=((HD+63)/64)*64`); loads
+  fill only real cols, QK k-loop runs `HD/16`, PV pad cols land in discarded acc lanes.
+- **Attention sink (`s_aux`):** per-head extra logit added to the **denominator only** (no value):
+  `sum += ex2((M_LOG2E*s_aux) - m*s2)`.
+- **`leftpad_k`:** absolute key lower-bound in the mask (== FA3's `offset_k += leftpad`).
+- **Empty/fully-masked/padded m-tiles:** must write `O=0, LSE=-inf` (else uninitialized `at::empty`
+  leaks garbage).
+- **page128 NaN (split-KV combine):** empty splits stamp `LSE=-inf` (weight 0) but never write
+  `Opart` (uninitialized). Fresh alloc = clean zeros (passes in isolation); after 30+ scenarios the
+  caching allocator recycles dirty NaN pages → `0*NaN=NaN`. Fix: guard `acc += w!=0 ? w*Opart : 0`.
+  (Signature "passes in isolation, fails in full suite" ⇒ suspect uninitialized/recycled memory.)
+
+## A.9 smem-budget arithmetic
+
+Hopper dynamic-smem cap ≈ **227 KB** (`227*1024 - 64`). Deepest pipeline that fits:
+```
+per    = (CN*HDsm + CN*HDVsm) * sizeof(TC) * 2      # one stage = K + V tiles
+qb     = CM * HDsm * sizeof(TC)                     # single Q buffer (not ringed; RS-P frees the P tile)
+budget = (227*1024 - 64) / occ                      # occ=2 halves the budget for 2 CTA/SM
+STAGES = max s in [1..5] with qb + s*per <= budget
+```
+hd256: Q alone = 64 KB ⇒ `CN*STAGES ≤ 163` at CM=128 ⇒ CN=48/ST=3 is the max wide-tile-at-deep-pipe.
+
+## A.10 Supersession warnings (do not re-introduce the superseded form)
+
+1. **smem layout:** no-swizzle `gmma_k_off` (`lt=0`, LBO=128/SBO=256) → **superseded** by 128B
+   swizzle (`lt=1`, K-major LBO=16/SBO=1024) once TMA landed (only swizzle makes TMA-write ==
+   wgmma-read).
+2. **V:** explicit Vᵀ transpose into K-major smem → **superseded** by MN-major V + `trans-b=1`.
+3. **`fence.proxy.async`:** required after generic STS; **droppable** when loads are cp.async/TMA
+   (async proxy) with proper wait/mbarrier — though kept as a cheap safety promotion.
+4. **inter-WG ping-pong:** believed the key softmax-hiding lever → **empirically disabled (NOPP)**;
+   the HW warp scheduler already interleaves the two consumer WGs.
+5. **LSE scale:** LSE uses `m*softmax_scale + ln(l)` (natural log), NOT the `s2 = scale*log2e` used
+   inside `ex2`. Easy to conflate.
+6. **FA3's NCU barrier-stall 2.24 is its persistent-scheduler tile handoff, NOT a working ping-pong**
+   (PC-sampling, §9). Don't chase the ping-pong.

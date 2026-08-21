@@ -1,0 +1,440 @@
+3131 kernels/fa3_hopper.cu
+2:// NO external libraries (no CUTLASS/CuTe/cuBLAS/cuDNN).  torch appears ONLY in the host mha_fwd +
+22:#include <cuda.h>            // driver API: CUtensorMap + cuTensorMapEncodeTiled (TMA), libcuda (-lcuda)
+40:template <typename T> __device__ __forceinline__ float to_float(T x);
+41:template <> __device__ __forceinline__ float to_float<__nv_bfloat16>(__nv_bfloat16 x) { return __bfloat162float(x); }
+42:template <> __device__ __forceinline__ float to_float<__half>(__half x) { return __half2float(x); }
+43:template <> __device__ __forceinline__ float to_float<__nv_fp8_e4m3>(__nv_fp8_e4m3 x) { return float(x); }
+45:template <typename T> __device__ __forceinline__ T from_float(float x);
+46:template <> __device__ __forceinline__ __nv_bfloat16 from_float<__nv_bfloat16>(float x) { return __float2bfloat16(x); }
+47:template <> __device__ __forceinline__ __half from_float<__half>(float x) { return __float2half(x); }
+49:__device__ __forceinline__ float warp_reduce_sum(float v) {
+57:struct Params {
+73:__global__ void attn_kernel(Params<TIn, TOut> p) {
+154:// whole-tensor TMA load path with a cp.async GATHER that swizzle-stores packed-Q and paged/contig
+158:namespace pf {
+159:// PF_CPASYNC=1: pipelined cp.async gather loaders (fast path). =0: synchronous uint4 stores (debug).
+164:constexpr int NThreads = 3 * WG, NumCons = 2 * WG, NumProd = WG, WS_STAGES = 3;
+168:// 128B-swizzle of a [.,HD] K-major bf16 tile, byte-exact with cp.async.bulk.tensor (TMA): the column's
+170:__device__ __forceinline__ int koff(int row, int c) { return (c >> 6) * 8192 + row * 64 + ((c & 63) ^ ((row & 7) << 3)); } // K-major (Q,K)
+171:__device__ __forceinline__ int voff(int key, int dv) { return (dv >> 6) * 8192 + key * 64 + ((dv & 63) ^ ((key & 7) << 3)); } // MN-major (V)
+174:template <int ROWS> __device__ __forceinline__ int koffR(int row, int c) { return (c >> 6) * (ROWS * 64) + row * 64 + ((c & 63) ^ ((row & 7) << 3)); }
+175:template <int ROWS> __device__ __forceinline__ int voffR(int key, int dv) { return (dv >> 6) * (ROWS * 64) + key * 64 + ((dv & 63) ^ ((key & 7) << 3)); }
+178:template <int ROWS> __device__ __forceinline__ uint64_t qk_doffR(int kb) { return (uint64_t)((kb & 3) * 2 + (kb >> 2) * (ROWS * 8)); }
+180:__device__ __forceinline__ uint64_t make_smem_desc(uint32_t a, uint32_t lbo, uint32_t sbo, uint32_t lt) {
+188:__device__ __forceinline__ uint64_t desc_add(uint64_t base, uint32_t off) {
+195:__device__ __forceinline__ uint64_t v_doff(int kb)  { return (uint64_t)(kb * 128); }
+199:__device__ __forceinline__ float quad_max(float v) {
+204:__device__ __forceinline__ float quad_sum(float v) {
+209:__device__ __forceinline__ uint32_t pack_bf16(float lo, float hi) {
+216:template <typename T> __device__ __forceinline__ uint32_t pack_2x(float lo, float hi);
+217:template <> __device__ __forceinline__ uint32_t pack_2x<__nv_bfloat16>(float lo, float hi) { return pack_bf16(lo, hi); }
+218:template <> __device__ __forceinline__ uint32_t pack_2x<__half>(float lo, float hi) {
+223:template <typename T> __device__ __forceinline__ constexpr bool is_f16() { return false; }
+224:template <> __device__ __forceinline__ constexpr bool is_f16<__half>() { return true; }
+225:__device__ __forceinline__ float ex2_approx(float x) {
+228:__device__ __forceinline__ void wgmma_wait0() { asm volatile("wgmma.wait_group.sync.aligned 0;\n" ::: "memory"); }
+229:__device__ __forceinline__ void wgmma_wait1() { asm volatile("wgmma.wait_group.sync.aligned 1;\n" ::: "memory"); }
+232:__device__ __forceinline__ float softmax_stats(float (&s)[CN/2], float* m_r, float* l_r, int r, int nb, float s2) {
+265:__device__ __forceinline__ void pf_mask(float (&s)[CN/2], int col0, int qlo, int qhi, int seqlen_k, int causal, int tg) {
+289:__device__ __forceinline__ void pf_mask_win(float (&s)[CN/2], int col0, int qlo, int qhi, int seqlen_k,
+317:__device__ __forceinline__ float fast_tanh(float x) {
+323:__device__ __forceinline__ void pf_softcap(float (&s)[CN/2], float scale, float softcap) {
+330:__device__ __forceinline__ void mbar_init(uint64_t* bar, int count) {
+334:__device__ __forceinline__ void mbar_arrive(uint64_t* bar) {
+336:    asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];\n" :: "r"(a) : "memory");
+338:__device__ __forceinline__ bool mbar_try_wait(uint64_t* bar, int phase) {
+345:__device__ __forceinline__ void producer_regs() { asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory"); }
+350:__device__ __forceinline__ void consumer_regs() {
+351:    if constexpr (R <= 128)      asm volatile("setmaxnreg.inc.sync.aligned.u32 128;\n" ::: "memory");
+352:    else if constexpr (R <= 168) asm volatile("setmaxnreg.inc.sync.aligned.u32 168;\n" ::: "memory");
+353:    else                         asm volatile("setmaxnreg.inc.sync.aligned.u32 232;\n" ::: "memory");
+356:// cp.async.bulk completions have delivered all expected bytes). One arrive per stage-fill.
+357:__device__ __forceinline__ void mbar_expect_tx(uint64_t* bar, uint32_t bytes) {
+359:    asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" :: "r"(a), "r"(bytes) : "memory");
+363:__device__ __forceinline__ void tma_box(void* dst, const CUtensorMap* map, int x, int y, uint64_t* bar) {
+365:    asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes"
+371:__device__ __forceinline__ void tma_box3(void* dst, const CUtensorMap* map, int x, int y, int z, uint64_t* bar) {
+373:    asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.tile.mbarrier::complete_tx::bytes"
+376:__device__ __forceinline__ void cp_async_16(uint32_t smem_addr, const void* gmem) {
+377:    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(smem_addr), "l"(gmem) : "memory");
+379:// Tie this thread's prior (untied) cp.async to `bar`: an arrive-on fires when those copies complete.
+381:__device__ __forceinline__ void cp_async_mbar_arrive(uint64_t* bar) {
+383:    asm volatile("cp.async.mbarrier.arrive.noinc.shared::cta.b64 [%0];\n" :: "r"(a) : "memory");
+385:// Producer->consumer publish of a filled stage. cp.async path: non-blocking, completion-tracked
+386:// (lets the producer race STAGES ahead). sync-store path: plain release arrive.
+388:#define PF_PUBLISH(bar) cp_async_mbar_arrive(bar)
+439:__device__ __forceinline__ void wg_fence_c(float (&c)[N]) {
+444:__device__ __forceinline__ void wg_fence_a(const uint32_t (&a)[M]) {
+455:__device__ __forceinline__ void qk_batch_g(float (&s)[CN/2], uint64_t baseA, uint64_t baseB, int p0) {
+513:__device__ __forceinline__ void pv_box64(float (&acc)[N], const uint32_t (&P)[CN/4], uint64_t baseV) {
+534:__device__ __forceinline__ void rescale_o_g(float (&acc_o)[N], const float* sc) {
+544:__device__ __forceinline__ void pv_boxes(float (&acc_o)[HDV/2], const uint32_t (&P)[CN/4], uint32_t sV_base) {
+553:__device__ __forceinline__ void qk_gemm_g(float (&s)[CN/2], uint32_t sQ_wg, uint32_t sK_base) {
+562:__device__ __forceinline__ void qk_rs_pv_g(float (&s)[CN/2], float (&acc_o)[HDV/2], const uint32_t (&P)[CN/4],
+572:__device__ __forceinline__ void pv_final_g(float (&acc_o)[HDV/2], const uint32_t (&P)[CN/4], uint32_t sV_base) {
+586:__device__ __forceinline__ int koff8(int row, int c) {
+590:__device__ __forceinline__ void wg_barrier(int id) {
+591:    asm volatile("bar.sync %0, 128;\n" :: "r"(id) : "memory");
+594:// an explicit arrival count: one consumer WG `bar.sync`s it (contributes its 128 threads + blocks)
+598:__device__ __forceinline__ void nb_sync(int id, int cnt) {
+599:    asm volatile("bar.sync %0, %1;\n" :: "r"(id), "r"(cnt) : "memory");
+601:__device__ __forceinline__ void nb_arrive(int id, int cnt) {
+606:__device__ __forceinline__ void qk_fp8_ss(float (&s)[64], uint32_t sQ_wg, uint32_t sK_base) {
+625:__device__ __forceinline__ void pv_fp8_ss(float (&acc_o)[HDV/2], uint32_t sP_wg, uint32_t sV_base) {
+650:__device__ __forceinline__ void build_P_rs_fp8(const float (&s)[64], uint32_t (&P16)[16], int tg, int group) {
+675:__device__ __forceinline__ void pv_fp8_rs(float (&acc_o)[HDV/2], const uint32_t (&P16)[16], uint32_t sV_base) {
+699:__device__ __forceinline__ void scatter_P_fp8(const float (&s)[64], uint32_t sP_wg_addr,
+713:// cp.async gather (fp8): the producer issues raw 16-byte copies and races STAGES ahead instead of
+716:// cp_async_mbar_arrive. Invalid rows (key>=seqlen_k
+718:// NaN would make 0*NaN=NaN). cp.async can't convert/transpose, so K/Q go straight to the swizzled
+721:__device__ __forceinline__ void gather_row_k8_cp(__nv_fp8_e4m3* sbase, uint32_t sbase_addr, int row,
+726:        if (valid) cp_async_16(sbase_addr + (uint32_t)o, src + c16 * 16);
+731:__device__ __forceinline__ void gather_row_plain8_cp(__nv_fp8_e4m3* sbase, uint32_t sbase_addr, int row,
+736:        if (valid) cp_async_16(sbase_addr + (uint32_t)o, src + c16 * 16);
+741:// (smem->smem; the global load latency is now hidden by cp.async, this pass only touches smem).
+743:__device__ __forceinline__ void transpose_v_smem8(__nv_fp8_e4m3* sVt, const __nv_fp8_e4m3* sVst, int key) {
+756:// zero it. TIn is the gmem element type: when TIn==TC (bf16/fp16) it is a raw 16-byte copy (cp.async
+758:// (TMA/cp.async can't convert ⇒ fp8 always takes the synchronous convert-store path).
+760:__device__ __forceinline__ void gather_row_k(TC* sbase, uint32_t sbase_addr, int row,
+768:            cp_async_16(sbase_addr + (uint32_t)(o * 2), src + c8 * 8);
+783:__device__ __forceinline__ void gather_row_v(TC* sbase, uint32_t sbase_addr, int key,
+791:            cp_async_16(sbase_addr + (uint32_t)(o * 2), src + c8 * 8);
+809:// lock-step). Mirrors the per-tile prefill_kernel coordinate/bounds math, minus split-KV (prefill
+810:// runs num_splits==1). m_block is LPT-reversed (largest causal tile first) for static-strided balance.
+811:struct PfTile {
+817:__device__ __forceinline__ PfTile pf_work(
+857:__device__ __forceinline__ int pf_bi(int work, int tiles_m, int hkv) { return work / (tiles_m * hkv); }
+864:__device__ __forceinline__ void emit_empty_lse(float* __restrict__ LSEpart, int tid, int split, int hq,
+877:// Single-split (num_splits==1) analogue of emit_empty_lse for a fully-masked / empty / padded tile:
+883:__device__ __forceinline__ void emit_zero_o(TC* __restrict__ O, float* __restrict__ LSE, int tid,
+902:template <typename TIn, typename TC, int HD, int HDV, bool USE_TMA, bool EXTRA, int STAGES, int CN = CTA_N,
+904:__global__ __launch_bounds__(WG * (1 + CM / 64), MINB) void prefill_kernel(
+912:        int num_splits, float* __restrict__ Opart, float* __restrict__ LSEpart,
+916:        const __grid_constant__ CUtensorMap mapK, const __grid_constant__ CUtensorMap mapV) {
+930:    const int m_block = blockIdx.x / num_splits, split = blockIdx.x % num_splits, hk = blockIdx.y, bi = blockIdx.z;
+967:    if (!empty_cta && num_splits > 1) {
+968:        const int per = (n_max - n_beg + num_splits - 1) / num_splits;
+974:        if (num_splits > 1)
+983:    TC* sV0 = sK0 + STAGES * KSTRIDE;
+984:    uint64_t* bars = reinterpret_cast<uint64_t*>(sV0 + STAGES * VSTRIDE);
+985:    uint64_t* full = bars;                 // [STAGES] count NumProd
+986:    uint64_t* empty = bars + STAGES;       // [STAGES] count NumCons
+987:    uint64_t* barQ = bars + 2 * STAGES;    // [1] count NumProd
+993:        // from one thread => 1 arrival; the non-TMA cp.async path keeps NumProd arrivals.
+996:        for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], fcnt); mbar_init(&empty[s], NCONS); }
+1006:        // Q (packed-GQA) loaded once via cp.async gather; rows map to distinct heads, so there is no
+1021:        else                PF_PUBLISH(&barQ[0]);       // non-blocking (cp.async completion-tracked)
+1044:                        const int st = li % STAGES;
+1045:                        if (li >= STAGES) { int ep = ((li / STAGES) - 1) & 1; while (!mbar_try_wait(&empty[st], ep)) {} }
+1067:                        const int st = li % STAGES;
+1068:                        if (li >= STAGES) { int ep = ((li / STAGES) - 1) & 1; while (!mbar_try_wait(&empty[st], ep)) {} }
+1083:        // ---------- non-TMA: cp.async gather, one row per thread ----------
+1084:        // Issue loads and publish without waiting -> the producer races up to STAGES ahead of the
+1085:        // consumers (bounded only by empty[] backpressure), hiding cp.async latency.
+1088:            const int st = li % STAGES;
+1089:            if (li >= STAGES) { int ep = ((li / STAGES) - 1) & 1; while (!mbar_try_wait(&empty[st], ep)) {} }
+1144:    // K/V TMA (cp.async.bulk) writes are made visible to the generic proxy (wgmma descriptor reads) by
+1147:    // non-TMA cp.async gather path keeps the explicit fence.
+1162:        const int st = li % STAGES, pst = (li - 1) % STAGES;
+1163:        const int fp = (li / STAGES) & 1;
+1181:    pv_final_g<TC, HDVsm, CN>(acc_o, P, sV_a + ((n_cnt - 1) % STAGES) * stV_bytes);
+1182:    mbar_arrive(&empty[(n_cnt - 1) % STAGES]);
+1194:        if (s_aux != nullptr && num_splits <= 1) {
+1202:        if (num_splits > 1) {
+1227:// k*gridDim.x) and processes them in a loop. The win vs the per-tile prefill_kernel is that the K/V
+1228:// ring is ONE CONTINUOUS stream across work-items -- PipelineState (the ring index g + its phase) is
+1235:// cheap enough to hide behind the continuous ring; GQA/paged would fall back to the cp.async gather --
+1240:// identically). num_splits is implicitly 1 (prefill); no split-KV epilogue. TMA-only (routed so).
+1241:template <typename TIn, typename TC, int HD, int HDV, bool USE_TMA, bool EXTRA, int STAGES, int CN = CTA_N,
+1243:__global__ __launch_bounds__(WG * (1 + CM / 64), MINB) void prefill_persist_kernel(
+1254:        const __grid_constant__ CUtensorMap mapK, const __grid_constant__ CUtensorMap mapV,
+1255:        const __grid_constant__ CUtensorMap mapQ) {
+1263:                                               // (mapQ), fast enough that the STAGES-deep continuous K/V
+1265:                                               // reload too but forced STAGES=2 (smem) -> starved K/V.
+1269:    TC* sV0 = sK0 + STAGES * KSTRIDE;
+1270:    uint64_t* bars = reinterpret_cast<uint64_t*>(sV0 + STAGES * VSTRIDE);
+1271:    uint64_t* full = bars;                     // [STAGES] count 1 (TMA tx-barrier)
+1272:    uint64_t* empty = bars + STAGES;           // [STAGES] count NCONS
+1273:    uint64_t* barQf = bars + 2 * STAGES;       // [QBUF] Q ready (producer -> consumers), count NumProd
+1274:    uint64_t* barQe = bars + 2 * STAGES + QBUF;// [QBUF] Q free  (consumers -> producer), count NCONS
+1275:    uint64_t* schF = bars + 2 * STAGES + 2 * QBUF;          // [SDEPTH] work ready (producer -> consumers)
+1276:    uint64_t* schE = bars + 2 * STAGES + 2 * QBUF + SDEPTH; // [SDEPTH] slot free (consumers -> producer)
+1277:    int* schW = reinterpret_cast<int*>(bars + 2 * STAGES + 2 * QBUF + 2 * SDEPTH);  // [SDEPTH] grabbed work idx
+1282:    // the per-item Q reload is one async TMA (not a 128-row cp.async gather) -- which is what makes the
+1284:    // Paged / rep-not-dividing-CM keep the cp.async gather.
+1290:        for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], USE_TMA ? 1 : NumProd); mbar_init(&empty[s], NCONS); }
+1317:            // warpgroup broadcasts it (bar.sync), and pt==0 signals schF for the consumers.
+1321:            asm volatile("bar.sync 1, %0;\n" :: "r"(WG) : "memory");
+1334:            // load absolute key-tile nb into ring stage (gg % STAGES); pt==0 issues the TMA boxes.
+1337:                const int st = gg % STAGES;
+1338:                if (gg >= STAGES) { int ep = ((gg / STAGES) - 1) & 1; while (!mbar_try_wait(&empty[st], ep)) {} }
+1364:            //     signal. rep==1 reloads via ONE TMA box-set; GQA/paged fall back to the cp.async gather.
+1419:    // Inter-WG ping-pong (mirrors prefill_kernel): the two consumer WGs process the SAME work item in
+1468:        // first key tile lives at the GLOBAL stage gbase%STAGES (phase from gbase), not stage 0.
+1469:        { int st0 = gbase % STAGES, fp0 = (gbase / STAGES) & 1; while (!mbar_try_wait(&full[st0], fp0)) {} }
+1473:        qk_gemm_g<TC, HD, CN, CM>(s, sQ_wg, sK_a + (gbase % STAGES) * stK_bytes);
+1484:            const int st = gg % STAGES, pst = (gg - 1) % STAGES, fp = (gg / STAGES) & 1;
+1502:        pv_final_g<TC, HDVsm, CN>(acc_o, P, sV_a + ((gbase + t.n_cnt - 1) % STAGES) * stV_bytes);
+1503:        mbar_arrive(&empty[(gbase + t.n_cnt - 1) % STAGES]);
+1508:        // epilogue (num_splits==1: write O / LSE directly).
+1516:            if (s_aux != nullptr) {                       // attention sink: extra logit in the denom (see prefill_kernel)
+1538:// Same warp-specialized shape as prefill_kernel (1 producer WG + 2 consumer WGs of 64 q-rows each)
+1543:template <int HD, int HDV, bool EXTRA, int STAGES, bool USE_TMA = false>
+1544:__global__ __launch_bounds__(NThreads, 1) void prefill_fp8_kernel(
+1552:        int num_splits, float* __restrict__ Opart, float* __restrict__ LSEpart,
+1555:        const __grid_constant__ CUtensorMap mapK, const __grid_constant__ CUtensorMap mapVst) {
+1562:    const int m_block = blockIdx.x / num_splits, split = blockIdx.x % num_splits, hk = blockIdx.y, bi = blockIdx.z;
+1583:    if (!empty_cta && num_splits > 1) {
+1584:        const int per = (n_max + num_splits - 1) / num_splits;
+1590:        if (num_splits > 1)
+1597:    constexpr int VstSTRIDE = CTA_N * HDV;     // one PLAIN [key][dv] V staging tile (cp.async target)
+1600:    __nv_fp8_e4m3* sV0 = sK0 + STAGES * KSTRIDE;
+1601:    __nv_fp8_e4m3* sP  = sV0 + STAGES * VSTRIDE;
+1603:    uint64_t* bars = reinterpret_cast<uint64_t*>(sVst0 + STAGES * VstSTRIDE);
+1604:    uint64_t* full = bars;                 // [STAGES] count NumProd  (K cp.async done + Vt transposed)
+1605:    uint64_t* empty = bars + STAGES;       // [STAGES] count NumCons
+1606:    uint64_t* loaded = bars + 2 * STAGES;  // [STAGES] count NumProd  (K + V-staging cp.async delivered)
+1607:    uint64_t* barQ = bars + 3 * STAGES;    // [1] count NumProd
+1612:        for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], NumProd); mbar_init(&empty[s], NumCons); mbar_init(&loaded[s], USE_TMA ? 1 : NumProd); }
+1619:        // ---------- producer: cp.async Q/K (swizzled) + V (plain staging), then transpose V into sVt ----
+1620:        // cp.async lets the producer race STAGES ahead instead of blocking per-LDG. K/Q stream straight
+1621:        // into the swizzled wgmma tiles; V can't be transposed by cp.async so it lands in a plain [key][dv]
+1631:        cp_async_mbar_arrive(&barQ[0]);
+1635:        // delivered against loaded[st] (one expect_tx covers K+Vst). Else: per-key cp.async gather.
+1640:            const int st = li % STAGES;
+1641:            if (li >= STAGES) { int ep = ((li / STAGES) - 1) & 1; while (!mbar_try_wait(&empty[st], ep)) {} }
+1680:            cp_async_mbar_arrive(&loaded[st]);
+1684:            const int st = li % STAGES;
+1686:            { int fp = (li / STAGES) & 1; while (!mbar_try_wait(&loaded[st], fp)) {} }
+1687:            asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");  // V-staging cp.async -> smem reads
+1689:            mbar_arrive(&full[st]);                          // K (cp.async, loaded) + Vt (transposed) ready
+1718:        const int st = li % STAGES;
+1719:        const int fp = (li / STAGES) & 1;
+1750:        if (num_splits > 1) {
+1773:// fp8 analog of prefill_persist_kernel. K + V-staging now load via TMA (cp.async.bulk.tensor; fp8 is
+1776:// config was long_scoreboard-bound on the cp.async gather. Q stays on the cp.async gather (one reload
+1778:// num_splits==1; the per-tile prefill_fp8_kernel still covers paged/split/varlen (cp.async).
+1779:template <int HD, int HDV, bool EXTRA, int STAGES>
+1780:__global__ __launch_bounds__(NThreads, 1) void prefill_fp8_persist_kernel(
+1790:        const __grid_constant__ CUtensorMap mapK, const __grid_constant__ CUtensorMap mapVst) {
+1796:    constexpr int QBUF = 1;                    // single-Q reload (cp.async, hidden by the K/V ring)
+1798:    constexpr int SCHED_BAR = 3;               // producer scheduler bar.sync id (consumer WGs use 1,2)
+1802:    __nv_fp8_e4m3* sV0 = sK0 + STAGES * KSTRIDE;
+1803:    __nv_fp8_e4m3* sP  = sV0 + STAGES * VSTRIDE;
+1805:    uint64_t* bars = reinterpret_cast<uint64_t*>(sVst0 + STAGES * VstSTRIDE);
+1806:    uint64_t* full = bars;                      // [STAGES] count NumProd (K cp.async + Vt transposed)
+1807:    uint64_t* empty = bars + STAGES;            // [STAGES] count NumCons
+1808:    uint64_t* loaded = bars + 2 * STAGES;       // [STAGES] count NumProd (K + V-staging cp.async)
+1809:    uint64_t* barQf = bars + 3 * STAGES;        // [QBUF] Q ready (producer -> consumers), count NumProd
+1810:    uint64_t* barQe = bars + 3 * STAGES + QBUF; // [QBUF] Q free  (consumers -> producer), count NumCons
+1811:    uint64_t* schF = bars + 3 * STAGES + 2 * QBUF;          // [SDEPTH] work ready (producer -> consumers)
+1812:    uint64_t* schE = bars + 3 * STAGES + 2 * QBUF + SDEPTH; // [SDEPTH] slot free (consumers -> producer)
+1813:    int* schW = reinterpret_cast<int*>(bars + 3 * STAGES + 2 * QBUF + 2 * SDEPTH);  // [SDEPTH] grabbed work idx
+1818:        for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], NumProd); mbar_init(&empty[s], NumCons); mbar_init(&loaded[s], 1); }
+1830:        // ---------- producer: cp.async Q/K (swizzled) + V (plain staging) -> in-smem transpose ----------
+1840:            asm volatile("bar.sync %0, %1;\n" :: "r"(SCHED_BAR), "r"(WG) : "memory");
+1851:            // gg%STAGES. pt==0 issues both boxes against loaded[st] (one expect_tx covers K+Vst bytes).
+1853:                const int st = gg % STAGES;
+1854:                if (gg >= STAGES) { int ep = ((gg / STAGES) - 1) & 1; while (!mbar_try_wait(&empty[st], ep)) {} }
+1875:                cp_async_mbar_arrive(&barQf[qslot]);
+1880:                const int gg = g + li, st = gg % STAGES, fp = (gg / STAGES) & 1;
+1882:                asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");   // V-staging cp.async -> smem reads
+1884:                mbar_arrive(&full[st]);                                          // K (cp.async) + Vt (transposed) ready
+1934:            const int st = gg % STAGES, fp = (gg / STAGES) & 1;
+1984:template <typename T> static constexpr CUtensorMapDataType tmap_dtype();
+1985:template <> constexpr CUtensorMapDataType tmap_dtype<__nv_bfloat16>() { return CU_TENSOR_MAP_DATA_TYPE_BFLOAT16; }
+1986:template <> constexpr CUtensorMapDataType tmap_dtype<__half>()        { return CU_TENSOR_MAP_DATA_TYPE_FLOAT16; }
+1987:template <> constexpr CUtensorMapDataType tmap_dtype<__nv_fp8_e4m3>() { return CU_TENSOR_MAP_DATA_TYPE_UINT8; }
+1993:static CUtensorMap make_fp8_contig(const at::Tensor& t, int rows_box, bool sw) {
+1994:    CUtensorMap map{};
+2010:static CUtensorMap make_fp8_paged(const at::Tensor& t, int block_size, bool sw) {
+2011:    CUtensorMap map{};
+2025:static CUtensorMap make_kv_map(const at::Tensor& t, int block_size) {
+2026:    CUtensorMap map{};
+2047:static CUtensorMap make_kv_map_contig(const at::Tensor& t, int cn) {
+2048:    CUtensorMap map{};
+2068:static CUtensorMap make_q_map_gqa(const at::Tensor& q, int rep, int cm) {
+2069:    CUtensorMap map{};
+2083:template <typename TIn, typename TC, int HD, int HDV, bool TMA, bool EXTRA, int STAGES = WS_STAGES, int CN = CTA_N,
+2085:static void launch_prefill_t(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+2088:                             const std::optional<at::Tensor>& page_table, const CUtensorMap& mapK,
+2089:                             const CUtensorMap& mapV, int hkv, int rep, int total_q, int block_size,
+2093:                             long o_row, long o_head, int num_splits, float* Opart, float* LSEpart,
+2104:    // reloaded per item via ONE async TMA (rep==1 contiguous), fast enough that the STAGES-deep K/V ring
+2105:    // hides it -> single-Q fits the full ring (no double-Q smem squeeze that forced STAGES=2 and starved
+2106:    // the pipe). Scoped to rep==1 + contiguous Q/KV: the rep>1 cp.async-gather Q reload serializes on the
+2109:    constexpr int PSTAGES = STAGES;
+2112:    // a half-height Q tile so a wider K/V tile fits at STAGES=3 (the ping-pong is off for HD>128 anyway).
+2123:        if (!paged && persist_q_ok && num_splits <= 1 && total_work >= 2L * num_sm) {
+2124:            CUtensorMap mapQ = (rep == 1) ? make_kv_map_contig<TC>(q, CM) : make_q_map_gqa<TC>(q, rep, CM);
+2125:            constexpr int QBUF = 1, SDEPTH = 2;   // must match prefill_persist_kernel
+2126:            int smem_p = (int)((QBUF * CM * HDsm + PSTAGES * CN * HDsm + PSTAGES * CN * HDVsm) * (int)sizeof(TC))
+2127:                         + (2 * PSTAGES + 2 * QBUF + 2 * SDEPTH) * (int)sizeof(uint64_t) + SDEPTH * (int)sizeof(int);
+2131:            if (!attr_set_p) { cudaFuncSetAttribute(prefill_persist_kernel<TIn, TC, HD, HDV, TMA, EXTRA, PSTAGES, CN, CM, MINB>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_p); attr_set_p = true; }
+2133:            prefill_persist_kernel<TIn, TC, HD, HDV, TMA, EXTRA, PSTAGES, CN, CM, MINB><<<dim3(gx, 1, 1), NTHR, smem_p, stream>>>(
+2147:    int smem = (int)((CM * HDsm + STAGES * CN * HDsm + STAGES * CN * HDVsm) * (int)sizeof(TC))
+2148:               + (2 * STAGES + 1) * (int)sizeof(uint64_t);
+2150:    if (!attr_set) { cudaFuncSetAttribute(prefill_kernel<TIn, TC, HD, HDV, TMA, EXTRA, STAGES, CN, CM, MINB>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); attr_set = true; }
+2151:    dim3 grid((unsigned)(tiles_m * num_splits), (unsigned)hkv, (unsigned)b);
+2152:    prefill_kernel<TIn, TC, HD, HDV, TMA, EXTRA, STAGES, CN, CM, MINB><<<grid, NTHR, smem, stream>>>(
+2160:        (float)softcap, win_l, win_r, num_splits, Opart, LSEpart,
+2165:static void launch_prefill(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+2193:    // (e.g. 96, padded to 128 in smem) can't tile cleanly -> fall back to the cp.async gather. The
+2197:    // the validated 48/64/128 do: CN=72 (hd192, would fit at STAGES=3) loads a wrong swizzle -> NaN.
+2198:    // hd192/hd256 use CN=64/48 at STAGES=3 (smem-maxed). FA3's wider CN=96/80 at STAGES=2 regressed
+2202:    // NOTE: a deep (CN=64, STAGES=5) hd128 ring for long contexts (large4k) was tried to fight the
+2211:    bool use_tma_paged = tma_dt_hd &&
+2217:    // mainloop via one [CN,64] box per col-block -- TMA hides the load latency that the cp.async gather
+2220:    bool use_tma_contig = tma_dt_hd && !paged &&
+2223:    bool use_tma = use_tma_paged || use_tma_contig;
+2224:    CUtensorMap mapK{}, mapV{};
+2225:    if (use_tma_paged) { mapK = make_kv_map<TC>(k, block_size); mapV = make_kv_map<TC>(v, block_size); }
+2226:    else if (use_tma_contig) { mapK = make_kv_map_contig<TC>(k, cn_eff); mapV = make_kv_map_contig<TC>(v, cn_eff); }
+2237:        if (use_tma) { if (extra) PF_LAUNCH(HD_, HDV_, ST_, CN_, CM_, true, true);  else PF_LAUNCH(HD_, HDV_, ST_, CN_, CM_, true, false); }   \
+2240:    if (hd == 64 && hdv == 64)        PF_DISPATCH(64, 64, WS_STAGES, 128, 128);
+2241:    else if (hd == 96 && hdv == 96)   PF_DISPATCH(96, 96, WS_STAGES, 128, 128);
+2246:    // finer 64-key tiles waste less compute past the window edge. STAGES=4 (CN=64 smem fits 5; the
+2250:        if (pf_windowed && use_tma_contig) PF_DISPATCH(128, 128, 4, 64, 128);
+2251:        else                               PF_DISPATCH(128, 128, WS_STAGES, 128, 128);
+2255:    // V accumulator frees smem for a deeper STAGES=4 K/V ring at CN=64 (hd192/hdv192 is stuck at STAGES=3).
+2258:    // CM=64 path (1 consumer WG) frees smem for a deeper STAGES=4 ring but loses the 2nd consumer
+2261:    // each owning half of HDV at acc_o[64]) restores 12 warps + STAGES=4, but pays either a 1.5x
+2271:// prefill_fp8_kernel: no TMA, V is transposed in-kernel, P round-trips through smem for SS PV.
+2272:template <int HD, int HDV, bool EXTRA, int STAGES = WS_STAGES>
+2273:static void launch_prefill_fp8_t(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+2280:                                 long o_row, long o_head, int num_splits, float* Opart, float* LSEpart,
+2287:    // remaining gap is the SS-PV smem round-trip / V-transpose, not ring depth; kept at STAGES=3.)
+2288:    // Scoped to non-paged + num_splits==1 (paged/split/varlen stay on the per-tile grid below).
+2289:    if (!paged && num_splits <= 1) {
+2294:            constexpr int QBUF = 1, SDEPTH = 2;   // must match prefill_fp8_persist_kernel
+2296:            int smem_p = (int)(QBUF * CTA_M * HDQK + STAGES * CTA_N * HDQK + STAGES * HDV * CTA_N + CTA_M * CTA_N
+2297:                               + STAGES * CTA_N * HDV)
+2298:                         + (3 * STAGES + 2 * QBUF + 2 * SDEPTH) * (int)sizeof(uint64_t) + SDEPTH * (int)sizeof(int);
+2307:                CUtensorMap mapK = make_fp8_contig(k, CTA_N, true);
+2308:                CUtensorMap mapVst = make_fp8_contig(v, CTA_N, false);
+2310:                if (!attr_set_p) { cudaFuncSetAttribute(prefill_fp8_persist_kernel<HD, HDV, EXTRA, STAGES>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_p); attr_set_p = true; }
+2312:                prefill_fp8_persist_kernel<HD, HDV, EXTRA, STAGES><<<dim3(gx, 1, 1), NThreads, smem_p, stream>>>(
+2322:            // !fp8_tma_ok -> fall through to the per-tile cp.async path below.
+2325:    // + STAGES*CTA_N*HDV for the plain V-staging ring (TMA/cp.async target, transposed in-smem to sVt);
+2326:    // + STAGES extra barriers (loaded[]) for the K/V delivered signal.
+2327:    constexpr int HDQK_ = (HD < 128) ? 128 : HD;   // K/Q 128-wide (koff8 row*128); see prefill_fp8_kernel
+2328:    int smem = (int)(CTA_M * HDQK_ + STAGES * CTA_N * HDQK_ + STAGES * HDV * CTA_N + CTA_M * CTA_N
+2329:                     + STAGES * CTA_N * HDV)
+2330:               + (3 * STAGES + 1) * (int)sizeof(uint64_t);
+2331:    dim3 grid((unsigned)(tiles_m * num_splits), (unsigned)hkv, (unsigned)b);
+2333:    // non-paged: contiguous heads. TMA offloads the per-key cp.async gather (long_scoreboard-bound) to
+2337:    // to the cp.async gather (loads exactly HD cols into the HDQK=128-padded koff8 tile).
+2345:        if (!as_##TMA_) { cudaFuncSetAttribute(prefill_fp8_kernel<HD, HDV, EXTRA, STAGES, TMA_>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); as_##TMA_ = true; } \
+2346:        prefill_fp8_kernel<HD, HDV, EXTRA, STAGES, TMA_><<<grid, NThreads, smem, stream>>>(             \
+2354:            (float)softcap, win_l, win_r, num_splits, Opart, LSEpart, qd, kd, vd, ds_b, ds_h, MK_, MV_); \
+2357:        CUtensorMap mapK = paged ? make_fp8_paged(k, block_size, true)  : make_fp8_contig(k, CTA_N, true);
+2358:        CUtensorMap mapVst = paged ? make_fp8_paged(v, block_size, false) : make_fp8_contig(v, CTA_N, false);
+2361:        CUtensorMap z{};
+2367:static void launch_prefill_fp8(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+2392:    launch_prefill_fp8_t<128, 128, EXTRA_>(q, k, v, out, lse, cu_q, cu_k, seqused_k, page_table, hkv,   \
+2399:} // namespace pf
+2411:namespace dec {
+2414:__device__ __forceinline__ float wreduce_sum(float v) {
+2422:__global__ void decode_kernel(
+2431:        int num_splits, float scale, float softcap, int win_l, int win_r, int causal) {
+2435:    if (witem >= num_splits * hkv * batch) return;
+2437:    const int split = witem % num_splits;
+2438:    int tmp = witem / num_splits;
+2455:    const int span = (klen + num_splits - 1) / num_splits;
+2537://   * warp 0 builds the per-split softmax weights in smem (num_splits <= 64).
+2543:__global__ __launch_bounds__(COMBINE_THREADS) void combine_kernel(
+2546:        int num_splits, int total_q, int hq, long o_row, long o_head) {
+2555:    __shared__ float sw[64];          // per-split softmax weight (num_splits <= 64)
+2559:        for (int s = tid; s < num_splits; s += 32)
+2564:        for (int s = tid; s < num_splits; s += 32) {
+2580:    // A zero-weight split contributes nothing -- but an EMPTY split (num_splits not dividing the
+2588:        for (; s + 4 <= num_splits; s += 4) {
+2596:        for (; s < num_splits; ++s) { float w = sw[s]; acc += w != 0.f ? w * base[(long)s * sstride + e] : 0.f; }
+2603:static void launch_decode_t(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+2621:    // num_splits: forced when cfg>0, else split aggressively for occupancy (this warp path is 1 warp /
+2623:    int num_splits;
+2624:    if (cfg_splits > 0) num_splits = cfg_splits;
+2631:        num_splits = std::max(1, std::min(std::min(want, cap), 64));
+2636:    at::Tensor Opart = at::empty({(long)num_splits, total_q, hq, HDV}, fopt);
+2637:    at::Tensor LSEpart = at::empty({(long)num_splits, hq, total_q}, fopt);
+2639:    int witems = num_splits * hkv * b;
+2642:    decode_kernel<TIn, TOut, HD, HDV, MAXM><<<grid, DEC_THREADS, 0, stream>>>(
+2651:        b, hq, hkv, rep, total_q, block_size, page_stride, num_splits,
+2656:        (TOut*)out.data_ptr(), (float*)lse.data_ptr(), num_splits, total_q, hq, o_row, o_head);
+2661:static void launch_decode(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+2688:} // namespace dec
+2691:// Allocates per-split scratch (normalized O + lse), launches prefill_kernel with grid.x = num_splits,
+2692:// then dec::combine_kernel reduces across splits. num_splits auto-fills ~2 waves of CTAs, capped by
+2694:// Largest stage count in [1,DS_MAX_STAGES] whose Q + STAGES*(K+V) smem fits the Hopper dynamic-smem cap
+2697:static constexpr int DS_MAX_STAGES = 5;
+2704:    int s = DS_MAX_STAGES;
+2710:static void launch_decode_split(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+2719:    using namespace pf;
+2734:    // Key-tile width (DCN) + STAGES, chosen per EFFECTIVE context length. hd128 has two regimes:
+2735:    //   wide (DCN=128, STAGES=3): moderate ctx -> wgmma n-width + fewer/meatier splits win;
+2736:    //   deep (DCN=64,  STAGES=5): long ctx     -> deeper K/V pipeline hides DRAM latency.
+2740:    // softmax; STAGES=3 still fits smem); windowed+softcap (gemma2, wide) keeps CN=48/STAGES=4
+2750:    // DCM=64 => single consumer warpgroup (decode is tiny-M; a 2nd WG would be fully masked).
+2751:    constexpr int DCM = 64;
+2752:    constexpr int DST_D2 = ds_fit_stages(DCN_D, DHDsm, DHDVsm, DCM, 2);  // 2 CTA/SM
+2754:    constexpr int DCM_DEEP = DCM, DCM_W = DCM;
+2755:    constexpr int DST_D = DEEP2 ? DST_D2 : ds_fit_stages(DCN_D, DHDsm, DHDVsm, DCM, 1);
+2757:    constexpr int DST_W = ds_fit_stages(DCN_W, DHDsm, DHDVsm, DCM);
+2758:    // Deep (narrow-CN, STAGES=5) for plain non-windowed hd128 -> hides DRAM latency. Windowed (SWA)
+2767:    const int DCM_RUN = deep ? DCM_DEEP : DCM_W;
+2768:    int tiles_m = (max_q * rep + DCM_RUN - 1) / DCM_RUN;
+2771:    int num_splits;
+2772:    if (cfg_splits > 0) num_splits = cfg_splits;
+2786:        num_splits = std::min(want, deep ? 48 : 32);
+2788:    if (num_splits > n_max_est) num_splits = std::max(1, n_max_est);
+2790:    bool use_tma = std::is_same<TIn, TC>::value && (HD % 64 == 0) && (HDV % 64 == 0) &&
+2795:    CUtensorMap mapK{}, mapV{};
+2796:    if (use_tma) { mapK = make_kv_map<TC>(k, block_size); mapV = make_kv_map<TC>(v, block_size); }
+2799:#define DS_LAUNCH(TMA_, EXTRA_, DCN_, DST_, DCM_, MINB_, NS_, OP_, LP_)                                 \
+2800:    launch_prefill_t<TIn, TC, HD, HDV, TMA_, EXTRA_, DST_, DCN_, DCM_, MINB_>(q, k, v, out, lse, cu_q, cu_k, seqused_k, page_table, \
+2804:#define DS_BY_TMA(EXTRA_, DCN_, DST_, DCM_, MINB_, NS_, OP_, LP_)                                       \
+2805:    do { if (use_tma) DS_LAUNCH(true, EXTRA_, DCN_, DST_, DCM_, MINB_, NS_, OP_, LP_);                  \
+2806:         else         DS_LAUNCH(false, EXTRA_, DCN_, DST_, DCM_, MINB_, NS_, OP_, LP_); } while (0)
+2808:    do { if (deep) { if (extra) DS_BY_TMA(true, DCN_D, DST_D, DCM_DEEP, MINB_D, NS_, OP_, LP_); else DS_BY_TMA(false, DCN_D, DST_D, DCM_DEEP, MINB_D, NS_, OP_, LP_); } \
+2809:         else      { if (extra) DS_BY_TMA(true, DCN_W, DST_W, DCM_W, 1, NS_, OP_, LP_); else DS_BY_TMA(false, DCN_W, DST_W, DCM_W, 1, NS_, OP_, LP_); } } while (0)
+2811:    if (num_splits <= 1) {                  // single split -> write final O/LSE directly (no combine)
+2819:    at::Tensor Opart = at::empty({(long)num_splits, total_q, hq, HDV}, fopt);
+2820:    at::Tensor LSEpart = at::empty({(long)num_splits, hq, total_q}, fopt);
+2822:    DS_BY_EXTRA(num_splits, opd, lpd);
+2828:        opd, lpd, (TC*)out.data_ptr(), (float*)lse.data_ptr(), num_splits, total_q, hq, o_row, o_head);
+2832:// per-split work runs on prefill_fp8_kernel (native fp8 wgmma, no convert pass). Output bf16.
+2834:static void launch_decode_split_fp8(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+2842:    using namespace pf;
+2859:    int num_splits;
+2860:    if (cfg_splits > 0) num_splits = cfg_splits;
+2868:        num_splits = std::min(want, 32);
+2870:    if (num_splits > n_max_est) num_splits = std::max(1, n_max_est);
+2874:    do { if (extra) launch_prefill_fp8_t<HD, HDV, true>(q, k, v, out, lse, cu_q, cu_k, seqused_k,        \
+2878:         else      launch_prefill_fp8_t<HD, HDV, false>(q, k, v, out, lse, cu_q, cu_k, seqused_k,        \
+2882:    if (num_splits <= 1) { DS8(1, nullptr, nullptr); return; }
+2885:    at::Tensor Opart = at::empty({(long)num_splits, total_q, hq, HDV}, fopt);
+2886:    at::Tensor LSEpart = at::empty({(long)num_splits, hq, total_q}, fopt);
+2888:    DS8(num_splits, opd, lpd);
+2891:        opd, lpd, (__nv_bfloat16*)out.data_ptr(), (float*)lse.data_ptr(), num_splits, total_q, hq, o_row, o_head);
+2898:static void launch(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+2940:std::vector<at::Tensor> mha_fwd(
+2952:    std::optional<at::Tensor> scheduler_metadata, int64_t num_splits, std::optional<bool> pack_gqa, int64_t sm_margin,
+2974:  // float scratch (kept alive until mha_fwd returns; freed only after the same-stream kernel runs, so
+2983:  // small/medium packed-M decode/append/spec (q <= 32 AND q*rep <= 64, i.e. one DCM=64 M-tile) and the
+2995:  // The split-KV kernel runs the prefill mainloop with DCM=64 (one consumer warpgroup), so it packs
+2999:  // prefill path) and q*rep<=64 (one DCM tile, right-sized -- CM=128 would waste a warpgroup on masked
+3026:  // num_splits=1); when batch*heads*m-tiles is small over a LONG context that leaves most SMs idle and
+3029:  // split count, and uses the deep STAGES=5 K/V pipeline -- exactly the long-context latency-hiding the
+3049:      pf::launch_prefill_fp8(q, k, v, out, lse, *cu_seqlens_q, cu_seqlens_k, seqused_k, page_table,
+3057:        page_table, QD_, KD_, VD_, b, hq, hkv, total_q, max_q, max_klen, (int)num_splits, softmax_scale, \
+3072:        (int)num_splits, softmax_scale, causal, softcap, win_l, win_r, stream);
+3073:    // hd64/hd96 fp8 decode: NATIVE fp8 wgmma via cp.async (no 128-wide TMA box, which would over-read a
+3079:        (int)num_splits, softmax_scale, causal, softcap, win_l, win_r, stream);
+3083:        (int)num_splits, softmax_scale, causal, softcap, win_l, win_r, stream);
+3102:at::Tensor mha_fwd_get_scheduler_metadata(
+3108:    int64_t num_splits, std::optional<bool> pack_gqa, int64_t sm_margin) {
+3121:        "Tensor? scheduler_metadata, int num_splits, bool? pack_gqa, int sm_margin, "
+3123:  m.impl("fwd", torch::kCUDA, &mha_fwd);
+3129:        "int num_splits, bool? pack_gqa, int sm_margin) -> Tensor");
+3130:  m.impl("get_scheduler_metadata", torch::kCUDA, &mha_fwd_get_scheduler_metadata);

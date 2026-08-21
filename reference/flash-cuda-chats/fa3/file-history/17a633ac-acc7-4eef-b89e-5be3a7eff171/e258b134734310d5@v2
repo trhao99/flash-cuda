@@ -1,0 +1,208 @@
+# fa3-cuda
+
+A **dependency-free CUDA + inline-PTX re-implementation of the FlashAttention-3 forward kernel**
+for NVIDIA **Hopper (sm90a)**. No CUTLASS / CuTe / cuBLAS / cuDNN — just `nvcc`, hand-written
+`wgmma` / TMA / mbarrier PTX, and `torch` only at the host op boundary.
+
+`kernels/fa3_hopper.cu` registers the exact vLLM `_vllm_fa3_C` op schema (`fwd` +
+`get_scheduler_metadata`) so it can A/B against — and drop in for — real FA3. It covers a broad
+surface: bf16 / fp16 / fp8-e4m3, paged + non-paged KV, GQA/MQA, causal, sliding-window, softcap,
+varlen, decode + split-KV, `head_dim_v != head_dim` (prefill + decode, hd=192/hdv=128), attention
+sink (`s_aux`), `cache_leftpad`, and fully-masked (causal q≫k) rows. **All 58 scenarios are
+numerically correct.** One scenario falls short of the 0.92× perf bar (`hd256_causal` 0.84×) — a
+hand-written-kernel architectural limit, analysed under
+[Perf-limited scenario](#perf-limited-scenario).
+
+Requires CUDA ≥ 12.3, a Hopper GPU, and a `torch` + vLLM (ships FA3 for sm90) install.
+
+## Build / run / test
+
+Everything needed lives in this repo (`bench/`). The harness compiles `fa3_hopper.cu` into a torch
+`.so` (via `torch.utils.cpp_extension` — no manual `nvcc`), checks correctness vs FA3 + an fp32
+reference, and benchmarks each scenario against `_vllm_fa3_C`.
+
+```bash
+pip install -r requirements.txt     # torch + vllm (the FA3 baseline); also needs CUDA toolkit + a Hopper GPU
+cd /home/yak/fa3-cuda
+
+python -m bench.eval                 # build + correctness + per-scenario speedup (the table below)
+python -m bench.eval --no-perf       # build + correctness only
+python -m bench.eval --configs fa3_dense_hd128_causal,fa3_dense_hd128_fp8   # run a subset
+python -m bench.eval --gpu 1         # choose a GPU
+```
+
+`bench/config.py` defines the 58 scenarios, `bench/shapes.py` builds the inputs + fp32 reference,
+and `bench/eval.py` is the build + A/B driver. (If vLLM isn't installed, correctness falls back to
+an absolute fp32-ref tolerance and perf is skipped.)
+
+Optional standalone debug micro-tools (compile directly, NCU-able, no torch):
+
+```bash
+A="-gencode arch=compute_90a,code=sm_90a"
+nvcc -O3 -std=c++17 $A kernels/probes/mainloop_micro.cu -o /tmp/mlmicro && /tmp/mlmicro   # consumer mainloop
+nvcc -O3 -std=c++17 $A kernels/probes/fp8_probe.cu      -o /tmp/fp8probe && /tmp/fp8probe  # fp8 QK/PV path
+```
+
+To NCU-profile one scenario on the built op (e.g. `ncu --set detailed python bench/prof_one.py`),
+`bench/prof_one.py` loads a prebuilt `.so` and runs a single config; select it via the `FA3_CFG`,
+`FA3_NS`, `FA3_ITERS`, `FA3_GPU` env vars.
+
+## Per-scenario speedup vs FA3
+
+Speedup = FA3 time / our time (>1 = we're faster). Byte-identical inputs to FA3 (`_vllm_fa3_C`) and
+our kernel; idle H200, GPU 0, warmup 300 + 100×5 L2-flushed CUDA-event timing. Scenarios mirror
+FlashAttention-3's own forward pytest grids (`hopper/test_flash_attn.py` dense + varlen,
+`hopper/test_attn_kvcache.py` kvcache/split-KV), plus an extended set (+18) that stresses dtype and
+feature breadth (section E of `bench/config.py`).
+
+**All 58 scenarios correct · geomean 1.095× · median 1.083× · 57/58 ≥0.92× · 48/58 ≥0.95×.** The
+seven previously-broken/slow extended scenarios (attention sink dense+varlen, `cache_leftpad`,
+dense+varlen `head_dim_v != head_dim`, fully-masked `q≫k`, and hd64 fp8 decode) are now all correct
+and ≥0.92×. The one scenario still under 0.92× — `hd256_causal` (0.84×) — is a hand-written-kernel
+architectural limit (see [Perf-limited scenario](#perf-limited-scenario)).
+
+![Per-scenario speedup vs FA3](docs/per_scenario_speedup.png)
+
+> Regenerate the chart with `python -m bench.plot` (snapshot data in `bench/plot.py`).
+
+### A) dense `flash_attn_func` (non-paged)
+
+| Scenario | Shape | Speedup | Note |
+|---|---|--:|---|
+| fa3_dense_hd64_causal     | 16h · q1024×k1024            | 1.364× | non-paged TMA + persist; beats FA3 |
+| fa3_dense_hd64_fp16       | 16h · q1024×k1024 · fp16     | 1.334× | fp16 on the hd64 path |
+| fa3_dense_hd128_oddseq    | 16/2 · q113×k203             | 1.209× | small odd-masking shape; overhead win |
+| fa3_dense_hd128_splits3   | 16/2 · q1024×k1024 · split3  | 1.185× | non-paged + forced 3 splits; +ping-pong |
+| fa3_dense_hd128_kgtq      | 16h · q256×k512              | 1.116× | k>q (prefix/partial fill) |
+| fa3_dense_hd128_seq256    | 16h · q256×k256              | 1.083× | small square; beats FA3 |
+| fa3_dense_hd128_noncausal | 16h · q1024×k1024            | 1.052× | TMA-Q persist; full attention |
+| fa3_dense_hd128_deg_q239k1 | 16h · q239×k1               | 1.051× | causal q≫k; fully-masked m-tiles zeroed (was wrong) |
+| fa3_dense_hd128_local     | 16/2 · q1024×k1024 · win[256,0] | 1.035× | GQA TMA-Q + CN=64 + ping-pong; +mask fast-out |
+| fa3_dense_hd128_fp16      | 16h · q1024×k1024 · fp16     | 1.031× | shares the bf16 path |
+| fa3_dense_hd128_causal    | 16h · q1024×k1024            | 1.028× | TMA-Q persist + dyn-sched + inter-WG ping-pong |
+| fa3_dense_hd128_fp8       | 16h · q1024×k1024 · fp8      | 1.009× | fp8 persist; K + V-stage via TMA |
+| fa3_dense_hd128_mqa       | 16/1 MQA · q1024×k1024       | 1.001× | GQA TMA-Q (3D box) persist + ping-pong |
+| fa3_dense_hd128_gqa       | 16/2 GQA · q1024×k1024       | 1.000× | GQA TMA-Q (3D box) persist + ping-pong |
+| fa3_dense_hd128_local_noncausal | 16h · q1024×k1024 · win[256,256] | 0.999× | symmetric sliding window, non-causal |
+| fa3_dense_hd128_sink      | 16h · q1024×k1024 · s_aux    | 0.992× | attention sink folded into the denom (was wrong 495×) |
+| fa3_dense_hd96_causal     | 16h · q1024×k1024            | 0.981× | hd96 not %64 → cp.async (no TMA) |
+| fa3_dense_hd128_seq16k    | 16h · q16384×k16384         | 0.958× | long-context prefill |
+| fa3_dense_hd128_softcap_gqa | 16/2 GQA · q1024×k1024 · softcap=15 | 0.954× | softcap + GQA |
+| fa3_dense_hd128_seq8k     | 16h · q8192×k8192           | 0.946× | long-context prefill |
+| fa3_dense_hd192_fp16      | 16h · q1024×k1024 · fp16     | 0.946× | fp16 on the hd192 path |
+| fa3_dense_hd128_fp8_gqa   | 16/2 GQA · q1024×k1024 · fp8 | 0.945× | fp8 + GQA |
+| fa3_dense_hd192_causal    | 16h · q1024×k1024            | 0.939× | TMA-Q persist; CN=64@STAGES=3; +mask fast-out |
+| fa3_dense_hd128_softcap   | 16h · q1024×k1024 · softcap=15 | 0.934× | TMA persist + EXTRA; mask→[lo,hi] fast-out |
+| fa3_dense_hd128_large4k   | 16h · q4096×k4096            | 0.928× | persist (1 wave); +mask fast-out on full tiles |
+| fa3_dense_hd192_dv128     | 16h · q1024×k1024 · hdv=128  | 0.921× | hd≠hdv prefill (FA3 hdimdiff); CN=64/STAGES=4 + ping-pong (was unsupported) |
+| fa3_dense_hd256_causal    | 16h · q1024×k1024            | 0.843× | register-bound: acc_o[128] caps occupancy at 1 CTA/SM; see Perf-limited |
+
+### B) varlen `flash_attn_varlen_func` (ragged)
+
+| Scenario | Shape | Speedup | Note |
+|---|---|--:|---|
+| fa3_varlen_hd64_causal    | 6h · ragged q≤256    | 1.484× | ragged varlen hd64; biggest win |
+| fa3_varlen_hd128_fp8      | 6/2 · ragged q≤256 · fp8 | 1.447× | ragged varlen fp8 |
+| fa3_varlen_hd128_causal   | 6/2 · ragged q≤256   | 1.335× | ragged varlen; overhead win |
+| fa3_varlen_hd128_mqa      | 6/1 MQA · ragged q≤256 | 1.321× | ragged varlen MQA |
+| fa3_varlen_hd128_noncausal| 6/2 · ragged q≤256   | 1.309× | ragged varlen, full attention |
+| fa3_varlen_hd192_dv128    | 6/2 · ragged q≤256 · hdv=128 | 1.307× | varlen hd≠hdv prefill (was unsupported) |
+| fa3_varlen_hd128_local    | 6/2 · ragged q≤256 · win[128,0] | 1.278× | sliding-window varlen |
+| fa3_varlen_hd128_sink     | 6/2 · ragged q≤256 · s_aux | 1.036× | attention sink, varlen (was wrong 395×) |
+
+### C) kvcache decode / split-KV (paged)
+
+| Scenario | Shape | Speedup | Note |
+|---|---|--:|---|
+| fa3_kv_hd128_dec1024        | 6/2 · q3×k1024 · paged        | 1.288× | spec decode q=3 |
+| fa3_kv_hd128_decode_mqa32   | 32/1 MQA · q1×k1024 · paged   | 1.281× | rep=32 (q·rep=32) → split-KV decode |
+| fa3_kv_hd128_leftpad        | 6/2 · q1×k2048 · leftpad=128  | 1.249× | cache_leftpad as absolute key lower-bound (was wrong 103×) |
+| fa3_kv_hd128_local_decode   | 8/2 · q1×k4096 · win[1024,0]  | 1.223× | sliding-window decode |
+| fa3_kv_hd128_decode_gqa5    | 10/2 · q1×k3131 · paged       | 1.198× | decode GQA ratio 5 |
+| fa3_kv_hd64_decode_gqa3     | 9/3 · q1×k3131 · paged        | 1.196× | decode hd64 GQA ratio 3 |
+| fa3_kv_hd128_dec339         | 6/2 · q1×k339 · paged         | 1.190× | short-context decode |
+| fa3_kv_hd128_page128        | 6/2 · q1×k2048 · page_size=128 | 1.164× | block_size 128 |
+| fa3_kv_hd128_decode_noncausal | 8/2 · q1×k3131 · paged      | 1.157× | decode, non-causal |
+| fa3_kv_hd128_page1          | 6/2 · q1×k2048 · page_size=1  | 1.134× | block_size 1 |
+| fa3_kv_hd128_dec800         | 6/2 · q64×k800 · paged        | 1.133× | q=64 → prefill fast path |
+| fa3_kv_hd128_page4          | 6/2 · q1×k2048 · page_size=4  | 1.131× | block_size 4 |
+| fa3_kv_hd256_split_auto     | 9/3 · q1×k4000 · split-auto   | 1.114× | hd256 auto split-KV |
+| fa3_kv_hd128_fp16_decode    | 16/8 · q1×k4000 · paged · fp16 | 1.113× | fp16 paged decode |
+| fa3_kv_hd128_decode_qlen8   | 16/8 · q8×k4224 · paged       | 1.106× | medium-q q=8 → split-KV decode |
+| fa3_kv_hd128_decode_mha     | 8/8 · q1×k4224 · paged        | 1.091× | decode MHA |
+| fa3_kv_hd256_decode_mqa16   | 16/1 · q1×k4224 · paged       | 1.060× | decode hd256 rep=16 |
+| fa3_kv_hd128_ctx20k         | 6/2 · q16×k20000 · paged      | 1.054× | q=16/k=20000 → split-KV decode |
+| fa3_kv_hd128_split2         | 16/8 · q1×k5555 · split2      | 1.023× | forced 2 KV-splits |
+| fa3_kv_hd64_fp8_decode      | 16/8 · q1×k4000 · paged · fp8 | 0.978× | native e4m3 wgmma hd64 (HDQK=128-padded koff8 tile); was 0.297× |
+| fa3_kv_hd128_fp8_decode     | 16/8 · q1×k4000 · paged · fp8 | 0.973× | native e4m3 wgmma decode (no convert pass) |
+| fa3_kv_hd128_decode_qlen120 | 16/8 · q120×k4224 · paged     | 0.948× | underfill→split-KV decode (CM=64, STAGES=5) |
+| fa3_kv_hd128_prefill3577    | 6/2 · q2048×k3577 · paged     | 0.937× | paged chunked-prefill; +mask fast-out |
+
+### Resolved gaps
+
+The seven extended scenarios that the earlier revision could not match (or ran slowly) are now
+**correct and ≥0.92×**:
+
+| Scenario | Was | Now | Fix |
+|---|---|--:|---|
+| fa3_dense_hd192_dv128  | unsupported | 0.921× | prefill `hd!=hdv` dispatch (the kernel already templated HD/HDV separately for decode); CN=64/STAGES=4 + inter-WG ping-pong |
+| fa3_varlen_hd192_dv128 | unsupported | 1.307× | same dispatch (varlen per-tile path) |
+| fa3_dense_hd128_sink   | wrong (495×) | 0.992× | `s_aux` folded into the softmax denominator at the epilogue (FA3 `finalize_aux`: `l += exp2(log2e·s_aux − max·s2)`) |
+| fa3_varlen_hd128_sink  | wrong (395×) | 1.036× | same |
+| fa3_kv_hd128_leftpad   | wrong (103×) | 1.249× | `cache_leftpad` as an absolute key lower-bound in the mask + leading-tile pruning |
+| fa3_dense_hd128_deg_q239k1 | wrong (bias 8e-2) | 1.051× | zero O + set LSE=−inf for fully-masked m-tiles that early-out before the mainloop (`emit_zero_o`) |
+| fa3_kv_hd64_fp8_decode | 0.297× | 0.978× | native e4m3 `wgmma` for hd64: pad the K/Q smem tiles to HDQK=128 so `koff8`'s `row*128` swizzle stride fits, load the real 64 cols via cp.async, contract `qk_fp8_ss<64>` over the real HD (the unused upper half is never read). Was blocked because the 128B-swizzle `koff8` overran the 64-wide tile (OOB); the fp8→bf16 cast workaround was LSU-bound at ~14µs |
+
+### Perf-limited scenario
+
+One correct scenario remains below 0.92×, an **architectural limit of the no-CUTLASS hand-written
+kernel**, confirmed by NCU profiling and direct experiment:
+
+**`hd256_causal` — 0.84× (register-capped).** `head_dim_v=256` forces a 128-register output
+accumulator (`acc_o[HDVsm/2]`) per consumer thread → only **1 CTA/SM** (2 CTAs would need ≤85
+regs/thread; `acc_o` alone is 128), so achieved occupancy is ~18% (3 warps/scheduler). NCU shows the
+kernel is **barrier/long-scoreboard-bound** (the lone CTA's consumer starves waiting for K/V), not
+tensor-bound (44%). Every hand-written lever was tried and hit a wall:
+- The contiguous-TMA 128B swizzle only composes at `CN ∈ {48,64,128}` (CN=32/72/80 corrupt → NaN), so
+  the tile can't widen toward FA3's CN=80.
+- `CN=64` at CM=128 either overflows the consumer (ptxas C7512 wgmma serialization) or forces a
+  `STAGES=2` ring that **deadlocks** the persistent continuous ring; a 240-reg rebalance hits the
+  exact-65536 register edge and also deadlocks.
+- The **CM=64 path** (half-height Q frees smem for a deeper STAGES=4 ring) is now correct (a `tiles_m`
+  bug that processed only half the rows was fixed) but measures **0.72×**: dropping to one consumer
+  warpgroup costs 8-vs-12 warps/SM, and the deeper ring can't recover it — **occupancy, not ring
+  depth, is the binding constraint**, and `acc_o[128]` hard-caps occupancy at 1 CTA/SM.
+- A **head-dim-split** (two consumer WGs on the same rows, each owning half of HDV at `acc_o[64]`)
+  would restore 12 warps + STAGES=4, but pays either a 1.5× redundant-QK cost (which by the 44%-tensor
+  arithmetic does not net beat 0.85×) or a complex asymmetric P-via-smem rewrite.
+
+FA3 reaches 0.92×+ at CN=80 only because CUTLASS's register allocator schedules that tile without
+serializing — exactly the co-design the project's hard `no CUTLASS/CuTe` constraint forbids.
+
+## Layout
+
+```
+kernels/
+  fa3_hopper.cu       # THE kernel: FA3 forward torch op — Hopper / sm90a (the deliverable)
+  probes/             # standalone, torch-free debug tools (compile with nvcc, NCU-able)
+    mainloop_micro.cu #   consumer-mainloop microbenchmark
+    fp8_probe.cu      #   fp8 e4m3 wgmma QK/PV validation
+    probe_common.cuh  #   shared host helpers for the probes
+bench/
+  config.py           # the 58 fa3test scenarios + build/tolerance constants
+  shapes.py           # deterministic inputs + pure-fp32 reference attention
+  eval.py             # build (cpp_extension) + correctness + perf A/B vs FA3
+  plot.py             # render the per-scenario speedup chart
+docs/                 # per-scenario speedup chart (design notes now in the distill-kernel skill)
+reference/            # FA3 + CUTLASS source (submodules) and CUDA/PTX/NCU docs (see reference/README.md)
+requirements.txt
+```
+
+Fetch the reference source submodules (FA3, CUTLASS) on a fresh clone with
+`git submodule update --init reference/cutlass reference/vllm-flash-attention`.
+
+The repo is self-contained: `bench/` builds, verifies, and benchmarks the kernel with no external
+tooling — the only outside dependency is the FA3 baseline itself (the `_vllm_fa3_C` op from an
+installed vLLM), which is what we A/B against. See
+`.claude/skills/distill-kernel/references/hopper-fa3.md` for design notes and the FA3→CUDA
+distillation methodology (and `portability.md` there for what carries over to the FA4/Blackwell port).

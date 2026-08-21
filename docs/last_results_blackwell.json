@@ -1,0 +1,1462 @@
+{
+  "arch": "blackwell",
+  "cfgset": "all",
+  "rows": [
+    {
+      "name": "dense_c_d64_s1k",
+      "ours": 1.2463984674736983,
+      "cudnn": 1.3648518896101454,
+      "flashinfer": 1.1556442714862218,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "dense_c_d64_s4k",
+      "ours": 0.9914656963683335,
+      "cudnn": 1.1342110716879938,
+      "flashinfer": 0.9416790093323959,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "dense_c_d64_s8k",
+      "ours": 0.9204825616842032,
+      "cudnn": 1.1154695942491073,
+      "flashinfer": 0.8867734410139282,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "dense_c_d128_s1k",
+      "ours": 1.2520197162706563,
+      "cudnn": 1.3900462339946618,
+      "flashinfer": 1.0676741592133174,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "dense_c_d128_s4k",
+      "ours": 0.9942332395131602,
+      "cudnn": 1.1739486979304745,
+      "flashinfer": 0.8912928897751607,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "dense_c_d128_s8k",
+      "ours": 0.9216064118027417,
+      "cudnn": 1.0886013609306446,
+      "flashinfer": 0.8231395252025235,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "dense_c_d128_gqa8_s2k",
+      "ours": 1.1110789654298545,
+      "cudnn": 1.2157917501369224,
+      "flashinfer": 0.945172942872915,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "dense_c_d128_gqa8_s8k",
+      "ours": 0.9015199754101345,
+      "cudnn": 1.1050857657122608,
+      "flashinfer": 0.8031334979078525,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "dense_c_d96_s2k",
+      "ours": 0.854321923243612,
+      "cudnn": 1.25,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "dense_c_d128_softcap50_s2k",
+      "ours": 1.915008947324927,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "dense_c_d128_sink_s2k",
+      "ours": 1.067035712728133,
+      "cudnn": 1.2282564949813788,
+      "flashinfer": 0.8919653183579366,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "dense_c_d256_s2k",
+      "ours": null,
+      "cudnn": 2.5957636479592363,
+      "flashinfer": 3.1864714962079237,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "dense_c_d256_s8k",
+      "ours": null,
+      "cudnn": 1.0558754827408854,
+      "flashinfer": 1.4386693871893965,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "dense_c_d192_s2k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "dense_c_d192_dv128_s2k",
+      "ours": 1.3170573189041388,
+      "cudnn": 1.5074515870132548,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "dense_nc_d128_s2k",
+      "ours": 0.9305281943976141,
+      "cudnn": 1.1672852440615546,
+      "flashinfer": 0.9445001236532478,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "dense_nc_d128_s8k",
+      "ours": 0.8759081396826813,
+      "cudnn": 1.1030862164961857,
+      "flashinfer": 0.9265637311778023,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "dense_nc_d256_s8k",
+      "ours": null,
+      "cudnn": 0.743843722281322,
+      "flashinfer": 1.1489255035318477,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "dense_c_d64_fp8_s8k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "dense_c_d128_fp8_s4k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "dense_c_d128_fp8_s8k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "dense_c_d128_fp8_gqa_s4k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "dense_c_d256_fp8_s8k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "dense_c_d128_fp8_scalar_s4k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": 1.1390428964575139,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "dense_c_d128_fp8_scalar_gqa_s4k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": 1.1118277651645339,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "dense_c_d64_fp8_scalar_s8k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": 1.0513269508218994,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "dense_c_d128_swa256_s4k",
+      "ours": 1.0525215309025335,
+      "cudnn": 1.142047021622817,
+      "flashinfer": 1.0078818691957285,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "dense_c_d128_swa4k_s4k",
+      "ours": 0.9727517615186777,
+      "cudnn": 0.9196749344949028,
+      "flashinfer": 0.8531281882872481,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "varlen_c_d128_mix",
+      "ours": 1.5877934431390381,
+      "cudnn": 1.1895884327311894,
+      "flashinfer": 0.9800057779242274,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "varlen_c_d64_mix",
+      "ours": 1.7737705460324003,
+      "cudnn": 1.1812227336927466,
+      "flashinfer": 0.9839345443114689,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "varlen_c_d128_mqa_mix",
+      "ours": 1.6174078256257782,
+      "cudnn": 1.1967444411067842,
+      "flashinfer": 0.989178107817546,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "varlen_c_d128_realmix",
+      "ours": 1.019587010199686,
+      "cudnn": 0.8707209670876739,
+      "flashinfer": 0.8749755739436832,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_dec_b16_s512",
+      "ours": 1.5648021474206568,
+      "cudnn": 1.8100998526222474,
+      "flashinfer": 1.1223091392480617,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_dec_b32_s1k",
+      "ours": 1.0356375835638563,
+      "cudnn": 1.4538878665025718,
+      "flashinfer": 1.0700976235985744,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_dec_b16_s4k",
+      "ours": 1.202039994621786,
+      "cudnn": 1.3327533666257179,
+      "flashinfer": 1.063888889338022,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_dec_b64_s4k",
+      "ours": 0.9458095793492813,
+      "cudnn": 1.178093402793337,
+      "flashinfer": 1.124931793923162,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_dec_b16_s4k_p16",
+      "ours": 1.090592376329609,
+      "cudnn": 1.3564464120722008,
+      "flashinfer": 1.0851100710974928,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_dec_b16_s4k_p128",
+      "ours": 1.190523181267416,
+      "cudnn": 1.3194748318728347,
+      "flashinfer": 1.037151665095507,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "qwen3_dec_b16_s4k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "qwen3_dec_b64_s4k",
+      "ours": 1.023704676870811,
+      "cudnn": 1.180398295872388,
+      "flashinfer": 1.115223733286271,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama70b_dec_b16_s4k",
+      "ours": 1.1781291957699431,
+      "cudnn": 1.345225135883294,
+      "flashinfer": 1.0715646981309037,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "mistral_dec_b16_s4k",
+      "ours": 1.2220485347233512,
+      "cudnn": 1.3453841437571652,
+      "flashinfer": 1.0720164482548682,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "gemma2_dec_b16_s4k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "llama8b_dec_b16_s16k",
+      "ours": 1.045220430587492,
+      "cudnn": 1.1999130954527526,
+      "flashinfer": 1.0934231688192309,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_dec_b64_s16k",
+      "ours": 0.9716868406646489,
+      "cudnn": 1.3153002859645304,
+      "flashinfer": 1.300073923155978,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_dec_b16_s32k",
+      "ours": 0.9609548593677213,
+      "cudnn": 1.2175453334741002,
+      "flashinfer": 1.1575813743389824,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "qwen3_dec_b16_s32k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama70b_dec_b4_s128k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "mistral_dec_b16_s16k",
+      "ours": 1.1768201699836673,
+      "cudnn": 1.3631669135232527,
+      "flashinfer": 1.0770014817178872,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_pf_q512",
+      "ours": 1.5771185886359114,
+      "cudnn": 1.5198039621139197,
+      "flashinfer": 1.049633373810584,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_pf_q2k",
+      "ours": 1.0879591871644745,
+      "cudnn": 1.3757419786987897,
+      "flashinfer": 0.8673934068698297,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_pf_q8k",
+      "ours": 0.9728323856109722,
+      "cudnn": 1.1655914303355999,
+      "flashinfer": 0.8821527070740918,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_pf_q2k_p16",
+      "ours": 1.0728897694680748,
+      "cudnn": 1.3627649520565044,
+      "flashinfer": 0.8728389195319024,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "qwen3_pf_q4k",
+      "ours": 1.0624808008174,
+      "cudnn": 1.2322106286747727,
+      "flashinfer": 0.8688017334639526,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama70b_pf_q8k",
+      "ours": 0.9562952217121926,
+      "cudnn": 1.0601209906913711,
+      "flashinfer": 0.8910159772744566,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "mistral_pf_q4k",
+      "ours": 1.0702073537644559,
+      "cudnn": 0.9251421061043982,
+      "flashinfer": 0.88092262589228,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "gemma2_pf_q4k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "llama8b_pf_ragged",
+      "ours": 1.0216962406206274,
+      "cudnn": 0.8554913633331257,
+      "flashinfer": 0.8761384573524592,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_ext_q512_k16k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_ext_q1k_k64k",
+      "ours": 0.9667570299760752,
+      "cudnn": 1.0955405082328882,
+      "flashinfer": 1.043846285154139,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "qwen3_ext_q512_k32k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama70b_ext_q1k_k128k",
+      "ours": 0.9435395555522724,
+      "cudnn": 1.0703221511036942,
+      "flashinfer": 1.0738447052421562,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_spec_q2_b16_s1k",
+      "ours": 1.1923544236268855,
+      "cudnn": 0.35281445201293266,
+      "flashinfer": 1.0728911203679778,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_spec_q4_b32_s4k",
+      "ours": 0.9278550941353458,
+      "cudnn": 0.14366750525197994,
+      "flashinfer": 1.0883447398271928,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_spec_q8_b16_s4k",
+      "ours": 1.0037001569734054,
+      "cudnn": 0.17003242610627073,
+      "flashinfer": 1.0285196039867852,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "qwen3_spec_q4_b16_s4k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "mixed_2pf2k_8dec1k",
+      "ours": 0.9393005299291697,
+      "cudnn": 0.9261084200650481,
+      "flashinfer": 0.8973291792202984,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "mixed_1pf8k_64dec4k",
+      "ours": 0.7763706639690715,
+      "cudnn": 0.5597713223337665,
+      "flashinfer": 0.48886069973933044,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "mixed_2pf2k_8dec16k",
+      "ours": 1.1673936432081369,
+      "cudnn": 0.5220752555055655,
+      "flashinfer": 0.6548801963967074,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_dec_bf16q_fp8kv_b16_s1k",
+      "ours": 4.690300976050993,
+      "cudnn": 6.202565132596589,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_dec_bf16q_fp8kv_b32_s4k",
+      "ours": 8.570091011549664,
+      "cudnn": 9.770544649159682,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_dec_bf16q_fp8kv_b16_s16k",
+      "ours": 9.912300387944995,
+      "cudnn": 11.351739372525845,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_pf_bf16q_fp8kv_q2k",
+      "ours": 1.6973603712903187,
+      "cudnn": 2.1155317395192217,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_dec_bf16q_fp8kv_scalar_b16_s1k",
+      "ours": 4.549156898224635,
+      "cudnn": 2.9620882540533007,
+      "flashinfer": 2.4180619409854436,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_dec_bf16q_fp8kv_scalar_b32_s4k",
+      "ours": 8.298468230940106,
+      "cudnn": 7.277694394451016,
+      "flashinfer": 7.228417922826992,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "llama8b_dec_fp8_scalar_b16_s4k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": 1.3929121665847615,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "llama8b_pf_fp8_scalar_q2k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": 1.185849542064286,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "attn_dense_hd64_causal",
+      "ours": 1.4861531334197575,
+      "cudnn": 1.4019758247686505,
+      "flashinfer": 1.04637068599966,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd96_causal",
+      "ours": 0.9963408778293724,
+      "cudnn": 1.3255578442960836,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_causal",
+      "ours": 1.376421292211469,
+      "cudnn": 1.392251794595266,
+      "flashinfer": 1.0186005358885724,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd192_causal",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "attn_dense_hd256_causal",
+      "ours": null,
+      "cudnn": 3.738915323863398,
+      "flashinfer": 4.223020835978331,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "attn_dense_hd128_noncausal",
+      "ours": 1.2580540041300352,
+      "cudnn": 1.5125196576114126,
+      "flashinfer": 1.0518296969448382,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_nc4k",
+      "ours": 0.98719464651871,
+      "cudnn": 1.1741644085717662,
+      "flashinfer": 0.9612098570094118,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_gqa",
+      "ours": 1.350374130598641,
+      "cudnn": 1.3403465238357004,
+      "flashinfer": 0.9679726235831121,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_mqa",
+      "ours": 1.3559002071563189,
+      "cudnn": 1.3454659184447688,
+      "flashinfer": 0.9673993931918956,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_fp16",
+      "ours": 1.3820383399471177,
+      "cudnn": 1.3873582202379835,
+      "flashinfer": 1.0060231887276176,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_fp8",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "attn_dense_hd128_softcap",
+      "ours": 2.49711567727005,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_local",
+      "ours": 1.2054708733443633,
+      "cudnn": 1.2047161905331996,
+      "flashinfer": 0.970578357100352,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_oddseq",
+      "ours": 1.9133109526829661,
+      "cudnn": 1.5971054868464818,
+      "flashinfer": 1.019064647783826,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_seq256",
+      "ours": 1.7963061141818681,
+      "cudnn": 1.7114127985447207,
+      "flashinfer": 0.9756377334053781,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_large4k",
+      "ours": 1.104575889789307,
+      "cudnn": 1.2795473848002341,
+      "flashinfer": 0.8567899229102975,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_splits3",
+      "ours": 1.346972817728026,
+      "cudnn": 1.3262076624496322,
+      "flashinfer": 0.9598333885795218,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_varlen_hd128_causal",
+      "ours": 1.6324787033477752,
+      "cudnn": 1.2331420553350243,
+      "flashinfer": 0.9973890815597587,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_varlen_hd128_noncausal",
+      "ours": 1.754607661979443,
+      "cudnn": 1.2227522786216358,
+      "flashinfer": 0.972562750440754,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_varlen_hd64_causal",
+      "ours": 1.782561986774768,
+      "cudnn": 1.1723893689778768,
+      "flashinfer": 0.9892472998635353,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_varlen_hd128_mqa",
+      "ours": 1.5741514698042696,
+      "cudnn": 1.1977360494546434,
+      "flashinfer": 0.9783299322524054,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_decode_mha",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_decode_gqa5",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_decode_mqa32",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_decode_qlen120",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_decode_qlen8",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd64_decode_gqa3",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd256_decode_mqa16",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "attn_kv_hd128_decode_noncausal",
+      "ours": 2.0939049196239266,
+      "cudnn": 2.574727578003338,
+      "flashinfer": 1.099758030328131,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_fp8_decode",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "attn_kv_hd128_split2",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd256_split_auto",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "attn_kv_hd128_local_decode",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_decode_gqa9",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_decode_gqa7",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_decode_128k_splitkv",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_page1",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_page4",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_page128",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_ctx20k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_prefill3577",
+      "ours": 1.0455110673307908,
+      "cudnn": 1.3156000247148034,
+      "flashinfer": 0.9561063685982696,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_dec339",
+      "ours": 1.4209184080046227,
+      "cudnn": 1.6895855367199717,
+      "flashinfer": 1.0889540487609108,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_dec1024",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_dec800",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd192_dv128",
+      "ours": 1.3494632609587,
+      "cudnn": 1.360699405407541,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_varlen_hd192_dv128",
+      "ours": 1.5635864376043431,
+      "cudnn": 1.1621896973589596,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd64_fp16",
+      "ours": 1.4765678950486982,
+      "cudnn": 1.414247352864347,
+      "flashinfer": 1.0381967075456215,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd192_fp16",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "attn_dense_hd128_fp8_gqa",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "attn_varlen_hd128_fp8",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "attn_kv_hd128_fp16_decode",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd64_fp8_decode",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "attn_dense_hd256_fp8",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "attn_kv_hd256_fp8_decode",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": false,
+      "unsup": true
+    },
+    {
+      "name": "attn_dense_hd128_kgtq",
+      "ours": 1.7207671214378435,
+      "cudnn": 1.6214191258312614,
+      "flashinfer": 0.9850067040887118,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_deg_q239k1",
+      "ours": 1.972732592562945,
+      "cudnn": null,
+      "flashinfer": 1.0,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_local_noncausal",
+      "ours": 1.1714285233106412,
+      "cudnn": 1.193881334122194,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_varlen_hd128_local",
+      "ours": 1.5957643046398151,
+      "cudnn": 1.1980643588022541,
+      "flashinfer": 1.0052204574676546,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_softcap_gqa",
+      "ours": 2.0948009604443967,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_sink",
+      "ours": 1.3088262889135984,
+      "cudnn": 1.3963766212449917,
+      "flashinfer": 0.939836505654746,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_varlen_hd128_sink",
+      "ours": 1.3792545249382098,
+      "cudnn": 1.183176938096588,
+      "flashinfer": 0.8178760340740541,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_kv_hd128_leftpad",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_seq8k",
+      "ours": 0.9309000706124668,
+      "cudnn": 1.1044198680150596,
+      "flashinfer": 0.8418722848513057,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_dense_hd128_seq16k",
+      "ours": 0.8784879861064285,
+      "cudnn": 1.055181865383668,
+      "flashinfer": 0.7769177416214299,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q1k1",
+      "ours": 2.188474512167512,
+      "cudnn": 1.842465745687666,
+      "flashinfer": 1.0898041636439426,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q3k3",
+      "ours": 2.178063742789757,
+      "cudnn": 1.809336325298712,
+      "flashinfer": 1.003431092913299,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q64k1",
+      "ours": 2.1987830623653184,
+      "cudnn": null,
+      "flashinfer": 1.0544747460662454,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q64k32",
+      "ours": 2.1841397741151636,
+      "cudnn": null,
+      "flashinfer": 1.053826232690676,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q64k128",
+      "ours": 2.1658830719539703,
+      "cudnn": 1.8407534702830282,
+      "flashinfer": 1.04946306321405,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q128k192",
+      "ours": 1.8763005795127743,
+      "cudnn": 1.6836099666489428,
+      "flashinfer": 1.0080745231581525,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q255k256",
+      "ours": 1.8864026904161937,
+      "cudnn": 1.6530919417654157,
+      "flashinfer": 0.9891696624466929,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q108k256",
+      "ours": 2.00678180251971,
+      "cudnn": 1.5932453127874058,
+      "flashinfer": 1.0197368459443121,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q113k128",
+      "ours": 2.1834556354335,
+      "cudnn": 1.8596590817013967,
+      "flashinfer": 1.052411601464602,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q113k211",
+      "ours": 1.8983547888864274,
+      "cudnn": 1.6042700955738594,
+      "flashinfer": 1.0208530554313853,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q128k217",
+      "ours": 1.8964912557795783,
+      "cudnn": 1.6006909760545298,
+      "flashinfer": 1.014388489470604,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q799k3",
+      "ours": 2.0189139736242234,
+      "cudnn": null,
+      "flashinfer": 1.0677637830628521,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q384k256",
+      "ours": 2.0379117450323614,
+      "cudnn": null,
+      "flashinfer": 1.0240475085048266,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q640k128",
+      "ours": 2.047021862577956,
+      "cudnn": null,
+      "flashinfer": 1.0532257595705221,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q512k256",
+      "ours": 1.9556962661224842,
+      "cudnn": null,
+      "flashinfer": 1.0244123070011677,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q1023k1024",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q1024k1023",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_causal_q2048k2048",
+      "ours": 1.416908781456236,
+      "cudnn": 1.5254926622295082,
+      "flashinfer": 1.007644589992458,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_noncausal_q1k1",
+      "ours": 2.207382403144995,
+      "cudnn": 1.8477527608008157,
+      "flashinfer": 1.0650906414672734,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_noncausal_q64k128",
+      "ours": 2.255829768546705,
+      "cudnn": 1.8343557385967688,
+      "flashinfer": 1.06889827441994,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_noncausal_q255k256",
+      "ours": 1.9173456656774301,
+      "cudnn": 1.8208954493901612,
+      "flashinfer": 0.988892209826334,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_noncausal_q128k217",
+      "ours": 2.0322780440058574,
+      "cudnn": 1.6502016437796723,
+      "flashinfer": 1.0205735777135785,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_noncausal_q512k256",
+      "ours": 2.0380134934711416,
+      "cudnn": null,
+      "flashinfer": 1.0131057180252783,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_noncausal_q1024k1023",
+      "ours": 2.7352697178817125,
+      "cudnn": null,
+      "flashinfer": 1.6743712493613716,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_local_q128k217",
+      "ours": 1.974138001400463,
+      "cudnn": 1.6126761533315552,
+      "flashinfer": 1.0556238401399445,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_local_q255k256",
+      "ours": 1.865695777131598,
+      "cudnn": 1.5630365533575115,
+      "flashinfer": 1.029770784155455,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_local_q512k256",
+      "ours": 1.7856388238585768,
+      "cudnn": null,
+      "flashinfer": 1.0119688324630285,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_local_q1024k1023",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_gqa_q113k211",
+      "ours": 1.9380070195876538,
+      "cudnn": 1.6356968888816024,
+      "flashinfer": 1.0267035603436947,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_gqa_q384k256",
+      "ours": 2.0577280513585943,
+      "cudnn": null,
+      "flashinfer": 1.0272699383161112,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_edge_gqa_q640k128",
+      "ours": 2.036024829001442,
+      "cudnn": null,
+      "flashinfer": 1.0482890894311643,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_real_llama8b_dec_s512",
+      "ours": 1.4997879948218624,
+      "cudnn": 1.3649691378124789,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_real_llama8b_dec_s4k",
+      "ours": 1.168739545149976,
+      "cudnn": 0.6397073762129691,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_real_llama8b_dec_s16k",
+      "ours": 1.0124187660621622,
+      "cudnn": 0.4291748433894624,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_real_llama8b_dec_b64_s4k",
+      "ours": 0.8763694813019001,
+      "cudnn": 0.5021095399912519,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_real_qwen3moe_dec_s512",
+      "ours": 1.4938650857581,
+      "cudnn": 1.3829615095511574,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_real_qwen3moe_dec_s4k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_real_qwen3moe_dec_s32k",
+      "ours": null,
+      "cudnn": null,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_real_llama8b_pf_s2k",
+      "ours": 1.0402597446579578,
+      "cudnn": 0.7494385967144216,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_real_llama8b_pf_s16k",
+      "ours": 0.9065406346074414,
+      "cudnn": 0.4750771206150268,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    },
+    {
+      "name": "attn_real_qwen3moe_pf_s4k",
+      "ours": 0.9842298052689534,
+      "cudnn": 0.5533565557776111,
+      "flashinfer": null,
+      "correct": true,
+      "unsup": false
+    }
+  ]
+}

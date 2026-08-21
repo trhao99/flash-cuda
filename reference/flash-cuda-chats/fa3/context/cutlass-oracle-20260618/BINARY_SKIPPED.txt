@@ -1,0 +1,21 @@
+Compiled binaries and PTX dumps were not copied (reproducible from sources).
+
+flash_fwd_hdim128_bf16_paged_sm90_cut38.ptx
+kernels/fused_attn_ovl
+kernels/fused_attn_wst_nopp
+kernels/swz_probe
+kernels/fused_attn_wso_li
+kernels/fused_attn
+kernels/tma_load
+kernels/fused_attn_noload
+kernels/cutlass_gemm_pv
+kernels/cutlass_gemm_qk
+kernels/fused_attn_wso
+kernels/tma_swz_test
+kernels/fused_attn_pipe
+kernels/fused_attn_wstp_nopp
+kernels/fused_attn_wst
+kernels/cutlass_gemm_qk.ptx
+kernels/fused_attn_ws
+kernels/ptx_gemm_pv
+kernels/softmax_test

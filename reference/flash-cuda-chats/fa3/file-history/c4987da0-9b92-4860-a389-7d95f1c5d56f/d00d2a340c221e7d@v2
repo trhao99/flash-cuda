@@ -1,0 +1,27 @@
+"""Minimal single-scenario kernel runner for NCU profiling.
+
+Usage: python /tmp/prof_one.py <config_name> [iters]
+Builds (cached) the candidate, makes inputs, calls the candidate fwd `iters` times.
+Run under ncu with a kernel-name regex to capture just the prefill/decode kernel.
+"""
+import sys, os
+sys.path.insert(0, "/home/yak/fa3-cuda")
+import torch
+from bench import config as C, shapes, eval as E
+
+name = sys.argv[1]
+iters = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+ns = "_fa3bench_C"
+work_dir = os.path.join("/home/yak/fa3-cuda", ".fa3_trials", ns)
+E.build_candidate(os.path.join("/home/yak/fa3-cuda","kernels","fa3_fwd.cu"), ns, work_dir)
+cfg = next(c for c in C.get_configs("fa3test") if c.name == name)
+torch.cuda.set_device(0)
+inp = shapes.make_inputs(cfg, seed=0, device="cuda:0")
+# warm
+for _ in range(2):
+    shapes.call_fwd(ns, inp)
+torch.cuda.synchronize()
+for _ in range(iters):
+    shapes.call_fwd(ns, inp)
+torch.cuda.synchronize()
+print("done", name)

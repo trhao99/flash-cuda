@@ -1,0 +1,11 @@
+scenario,bar,phase,dtype,head_dim,status,ours_x,cudnn_x,fi_x,base_us,cand_us,cudnn_us,fi_us,err_ratio,note
+attn_real_llama8b_dec_s512,Decode,decode,bf16,128,OK,1.4998,1.3650,,56.61,37.74,41.47,,0.778,
+attn_real_llama8b_dec_s4k,Decode,decode,bf16,128,OK,1.1687,0.6397,,100.74,86.19,157.47,,0.8836,
+attn_real_llama8b_dec_s16k,Decode,decode,bf16,128,OK,1.0124,0.4292,,224.35,221.60,522.75,,1.006,
+attn_real_llama8b_dec_b64_s4k,Decode,decode,bf16,128,OK,0.8764,0.5021,,234.21,267.25,466.45,,0.9481,
+attn_real_qwen3moe_dec_s512,Decode,decode,bf16,128,OK,1.4939,1.3830,,54.54,36.51,39.44,,0.861,
+attn_real_qwen3moe_dec_s4k,Decode,decode,bf16,128,OK,,,,,,,,0.0003324, (no-baseline)
+attn_real_qwen3moe_dec_s32k,Decode,decode,bf16,128,OK,,,,,,,,0.0001323, (no-baseline)
+attn_real_llama8b_pf_s2k,Prefill,prefill,bf16,128,OK,1.0403,0.7494,,128.16,123.20,171.01,,1,
+attn_real_llama8b_pf_s16k,Prefill,prefill,bf16,128,OK,0.9065,0.4751,,1865.47,2057.79,3926.67,,1,
+attn_real_qwen3moe_pf_s4k,Prefill,prefill,bf16,128,OK,0.9842,0.5534,,167.76,170.45,303.17,,1,

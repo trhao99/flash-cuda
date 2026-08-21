@@ -1,0 +1,47 @@
+{
+  "mode": "PV",
+  "gpu": 0,
+  "rows": [
+    {
+      "shape": "2048x2048x128",
+      "cutlass_ms": 0.019673,
+      "cutlass_tflops": 54.58,
+      "ptx_ms": 0.018631,
+      "ptx_tflops": 57.63,
+      "perf_ratio_ptx_over_cutlass": 1.0559,
+      "output_max_abs_diff": 0.0,
+      "ptx_correct_vs_ref": true
+    },
+    {
+      "shape": "4096x4096x128",
+      "cutlass_ms": 0.069358,
+      "cutlass_tflops": 61.92,
+      "ptx_ms": 0.066953,
+      "ptx_tflops": 64.15,
+      "perf_ratio_ptx_over_cutlass": 1.036,
+      "output_max_abs_diff": 0.0,
+      "ptx_correct_vs_ref": true
+    },
+    {
+      "shape": "8192x8192x128",
+      "cutlass_ms": 0.253832,
+      "cutlass_tflops": 67.68,
+      "ptx_ms": 0.253671,
+      "ptx_tflops": 67.72,
+      "perf_ratio_ptx_over_cutlass": 1.0006,
+      "output_max_abs_diff": 0.0,
+      "ptx_correct_vs_ref": true
+    },
+    {
+      "shape": "16384x16384x128",
+      "cutlass_ms": 1.007626,
+      "cutlass_tflops": 68.2,
+      "ptx_ms": 0.965981,
+      "ptx_tflops": 71.14,
+      "perf_ratio_ptx_over_cutlass": 1.0431,
+      "output_max_abs_diff": 0.0,
+      "ptx_correct_vs_ref": true
+    }
+  ],
+  "ts": 1781749114.0854976
+}

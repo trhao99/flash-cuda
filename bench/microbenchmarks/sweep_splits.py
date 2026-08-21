@@ -1,0 +1,45 @@
+"""Sweep num_splits for one decode config on the prebuilt candidate .so vs the FA3 baseline.
+
+Validates whether forcing more splits (flash-decoding parallelism) fixes the large-base
+long-context decode slowness. No rebuild: num_splits is a runtime op arg.
+
+    FA3_CFG=attn_real_llama8b_dec_s4k /home/yak/miniconda3/envs/dev/bin/python \
+        -m bench.microbenchmarks.sweep_splits
+"""
+import sys, os, dataclasses, torch
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, _REPO_ROOT)
+from bench import scenarios as S
+
+ns = os.environ.get("FA3_NS", "_distill_fa3_C")
+cfg_name = os.environ.get("FA3_CFG", "attn_real_llama8b_dec_s4k")
+gpu = int(os.environ.get("FA3_GPU", "0"))
+torch.cuda.set_device(gpu)
+so = os.path.join(_REPO_ROOT, ".fa3_trials", ns, f"{ns}.so")
+torch.ops.load_library(so)
+from bench import eval as _eval
+assert _eval.load_baseline(), "FA3 baseline _vllm_fa3_C not importable"
+
+base_cfg = next(c for c in S.get_configs("all") if c.name == cfg_name)
+
+def time_ns(namespace, inp, iters=100, warmup=50):
+    for _ in range(warmup):
+        S.call_fwd(namespace, inp)
+    torch.cuda.synchronize()
+    s = torch.cuda.Event(True); e = torch.cuda.Event(True)
+    s.record()
+    for _ in range(iters):
+        S.call_fwd(namespace, inp)
+    e.record(); torch.cuda.synchronize()
+    return s.elapsed_time(e) / iters * 1e3  # us
+
+# FA3 baseline (auto splits)
+inp0 = S.make_inputs(base_cfg, 0, device=f"cuda:{gpu}")
+base_us = time_ns("_vllm_fa3_C", inp0)
+print(f"{cfg_name}: FA3 baseline = {base_us:7.1f} us")
+print(f"{'num_splits':>10} {'ours us':>9} {'speedup':>8}")
+for ns_split in (0, 1, 2, 4, 8, 16, 32):
+    cfg = dataclasses.replace(base_cfg, num_splits=ns_split)
+    inp = S.make_inputs(cfg, 0, device=f"cuda:{gpu}")
+    us = time_ns(ns, inp)
+    print(f"{ns_split:>10} {us:9.1f} {base_us/us:8.3f}")

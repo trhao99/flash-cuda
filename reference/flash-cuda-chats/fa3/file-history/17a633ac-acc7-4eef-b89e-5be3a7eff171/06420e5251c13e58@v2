@@ -1,0 +1,55 @@
+# Portability map: general vs architecture-specific
+
+The point of this file: when you distill FA4 on Blackwell (cupy) after FA3 on Hopper, you should
+**reuse the left column verbatim** and only **rewrite the right column**. Keep new findings sorted
+into the correct column as you go.
+
+## Portable — reuse verbatim across FA3/FA4, Hopper/Blackwell, .cu/cupy
+
+| Thing | Where it lives | Notes |
+|---|---|---|
+| The distillation loop | `SKILL.md` | trace → confirm-in-PTX → build-blocks → fuse → profile → refute → measure → record |
+| Fitness/eval contract | `SKILL.md` + your harness | build once; correctness vs oracle **and** fp32 ref; per-config `ratio = oracle_ms/ours_ms`; geomean/median/min |
+| Correctness-first dispatcher + fallback | `SKILL.md` | general path handles every feature; fast paths selected only once bit-exact-verified |
+| Bit-exactness discipline | `SKILL.md` | match the reference's exact math ops, not just tolerance |
+| Online-softmax **math** | this file (below) | log2 domain, running max/sum rescale, LSE = scale·max + ln(sum) — the *algorithm* is arch-independent; only the *instruction* (`ex2.approx` vs the Blackwell equivalent) is arch-specific |
+| NCU hypothesis → refute → measure | `SKILL.md` + `perf-hypothesis-verifier` | GEMM-only-ceiling ablation is the highest-value probe on any arch |
+| Memory conventions | `SKILL.md` | baseline / dont-retry / specific-fix |
+| The two subagents | `agents/` | `kernel-tracer`, `perf-hypothesis-verifier` are arch-agnostic; only the reference paths they're pointed at change |
+| PTX/SASS-is-ground-truth rule | `SKILL.md` + `scripts/inspect_ptx.py` | the *instructions counted* differ per arch; the discipline doesn't |
+
+### The softmax algorithm (portable pseudo-code)
+```
+# per row, streaming over key-blocks nb:
+m_new = max(m_old, rowmax(S_nb))
+corr  = exp2((m_old - m_new) * scale_log2e)        # rescale factor for running O and l
+P     = exp2(S_nb * scale_log2e - m_new*scale_log2e) # <-- ex2.approx.ftz on Hopper
+l     = l*corr + rowsum(P)
+O     = O*corr + P @ V_nb
+# epilogue: O /= l ; LSE = m_new*scale + ln(l)
+```
+Only the exp2 *instruction* and the fragment layout of `S`/`O` are arch-specific.
+
+## Architecture-specific — rewrite per pack
+
+| Thing | Hopper/FA3 (`hopper-fa3.md`) | Blackwell/FA4 (`blackwell-fa4.md`) |
+|---|---|---|
+| MMA op | `wgmma.mma_async.m64nNk16` (async warpgroup MMA) | `tcgen05.mma` (tensor-memory MMA) |
+| Accumulator location | register fragments (per-thread) | **tmem** (tensor memory) — different addressing entirely |
+| MMA fragment layout | thread(warp,lane)→(row,col) maps | tmem lane/column addressing |
+| smem swizzle | 128B swizzle offset formulas (bf16 + fp8 1-byte) | Blackwell swizzle atoms |
+| Data movement | `cp.async.bulk.tensor` (TMA) + `cp.async.cg` | TMA + tcgen05 load/store; CTA-pair TMA |
+| Warp specialization | `setmaxnreg`, named barriers, producer/2-consumer | may differ (CTA-pair, 2-SM cluster MMA) |
+| Register-source operands | RS PV (P in regs, K-major packing) | tmem-source operands |
+| Tile sizes | per-head-dim CM/CN/stages table | re-derive for SM100 smem/tmem budget |
+| Build flag | `-gencode arch=compute_90a,code=sm_90a` | `compute_100a` / `sm_100a` |
+| Build/eval glue | torch `cpp_extension` → `.so` torch op | **cupy** `RawKernel`/`RawModule` JIT; eval wrapper calls the cupy kernel instead of `torch.ops` |
+
+## When you start FA4
+
+1. Copy the loop from `SKILL.md` unchanged.
+2. Write `blackwell-fa4.md` by running `kernel-tracer` against the FA4 reference for each config.
+3. Write a cupy eval wrapper matching the same fitness contract (build-once/correctness/ratio).
+4. Point the two subagents at the FA4 reference paths.
+5. The softmax math, dispatcher pattern, bit-exactness rules, and hypothesis-refutation workflow
+   transfer with zero change. Expect the *entire* MMA/tmem/swizzle/descriptor layer to be new.

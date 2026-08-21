@@ -1,0 +1,53 @@
+# Blackwell / SM100 / FlashAttention-4 reference pack (SKELETON — fill via kernel-tracer)
+
+Status: **skeleton.** FA4 on Blackwell is implemented differently (cupy, `tcgen05` tensor-core MMA,
+tensor memory / tmem, new TMA/cluster features). Fill each section by running the `kernel-tracer`
+subagent against the FA4 reference for each target config, and confirm every claim in PTX/SASS
+(`cuobjdump -sass`/`nvdisasm` on the built cupy module; `compute_100a`/`sm_100a`).
+
+Do **not** copy Hopper formulas here — the MMA/accumulator/swizzle/descriptor layer is entirely
+different. Copy only the *structure* of `hopper-fa3.md` so the two packs are comparable. Anything
+that turns out to be shared belongs in `portability.md`, not here.
+
+## 0. Target + toolchain
+- [ ] Reference source root / repo (the cupy FA4 implementation).
+- [ ] Reference oracle to diff against (the shipped FA4 module).
+- [ ] Build: cupy `RawKernel`/`RawModule` JIT flags; the `compute_100a` requirement for `tcgen05`.
+- [ ] Fitness harness: cupy eval wrapper (same contract as `bench.eval`: build once, correctness vs
+      oracle + fp32 ref, per-config `ratio = oracle_ms/ours_ms`, geomean).
+
+## 1. MMA — tcgen05
+- [ ] The exact `tcgen05.mma` instruction(s) per GEMM (QK, PV), operand kinds, K-step.
+- [ ] Accumulator in **tmem**: addressing, how the fragment maps to tmem lanes/columns.
+- [ ] How operands are sourced (smem descriptors? tmem? CTA-pair shared?).
+- [ ] Register/tmem budget and its effect on occupancy (CTA/SM).
+
+## 2. Tensor memory (tmem)
+- [ ] Allocation/addressing model; tmem↔smem↔register movement instructions.
+- [ ] How softmax reads/writes the S accumulator when it lives in tmem (this is the big FA3→FA4
+      structural change — softmax no longer operates on register fragments the same way).
+
+## 3. smem swizzle
+- [ ] Blackwell swizzle atom(s) and the offset formula(s) for each operand majorness.
+- [ ] The "TMA-write swizzle == MMA-read swizzle, only self-consistency matters" insight — verify it
+      still holds on SM100.
+
+## 4. Data movement / TMA
+- [ ] TMA descriptor params on SM100; CTA-pair / 2-SM-cluster TMA if used.
+- [ ] Producer model (single warp? single thread? cluster?).
+- [ ] mbarrier / pipeline protocol differences from SM90.
+
+## 5. Softmax numerics (mostly portable — see portability.md)
+- [ ] The Blackwell exp2 instruction (confirm the `.approx.ftz` equivalent) for bit-faithfulness.
+- [ ] Any change to LSE / rescale / descale-folding.
+
+## 6. Warp specialization / scheduling
+- [ ] Producer/consumer split; whether Blackwell changes the named-barrier ping-pong.
+- [ ] 2-SM cluster MMA cooperation, if used.
+- [ ] Persistent / dynamic tile scheduler.
+
+## 7. Per-config tile sizes + smem/tmem budget
+- [ ] The tile table (CM/CN/stages) FA4 uses per head-dim/dtype, and the budget arithmetic.
+
+## 8. Don't-retry (fill as you go)
+- [ ] Dead-end attempts + measured results, so future sessions skip them.

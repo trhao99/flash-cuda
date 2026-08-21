@@ -1,0 +1,135 @@
+"""Render the per-scenario speedup-vs-FA3 bar chart for the README.
+
+Mirrors the canvas "Per-scenario speedup vs FA3 (40 supported, sorted)" chart: one horizontal bar
+per fa3test scenario, sorted ascending, colored by tier (green >=1.0, blue 0.95-1.0, amber
+0.85-0.95, red <0.85), with a parity reference line at 1.0.
+
+    cd /home/yak/fa3-cuda && python -m bench.plot      # -> docs/per_scenario_speedup.png
+
+The ratios below are a SNAPSHOT of the latest measured run (ultracode session 2026-06-24, idle
+H200, GPU 0). Regenerate the numbers any time with `python -m bench.eval`.
+"""
+from __future__ import annotations
+
+import math
+import os
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.patches import Patch  # noqa: E402
+
+# (scenario, speedup = FA3 time / our time). Snapshot; reproduce with `python -m bench.eval`.
+RESULTS = [
+    ("fa3_dense_hd64_causal", 1.370),
+    ("fa3_dense_hd96_causal", 0.988),
+    ("fa3_dense_hd128_causal", 1.045),
+    ("fa3_dense_hd192_causal", 0.933),
+    ("fa3_dense_hd256_causal", 0.847),
+    ("fa3_dense_hd128_noncausal", 1.057),
+    ("fa3_dense_hd128_gqa", 1.009),
+    ("fa3_dense_hd128_mqa", 1.021),
+    ("fa3_dense_hd128_fp16", 1.048),
+    ("fa3_dense_hd128_fp8", 1.009),
+    ("fa3_dense_hd128_softcap", 0.972),
+    ("fa3_dense_hd128_local", 0.976),
+    ("fa3_dense_hd128_oddseq", 1.226),
+    ("fa3_dense_hd128_seq256", 1.102),
+    ("fa3_dense_hd128_large4k", 0.930),
+    ("fa3_dense_hd128_splits3", 1.189),
+    ("fa3_varlen_hd128_causal", 1.337),
+    ("fa3_varlen_hd128_noncausal", 1.329),
+    ("fa3_varlen_hd64_causal", 1.503),
+    ("fa3_varlen_hd128_mqa", 1.366),
+    ("fa3_kv_hd128_decode_mha", 1.086),
+    ("fa3_kv_hd128_decode_gqa5", 1.186),
+    ("fa3_kv_hd128_decode_mqa32", 1.263),
+    ("fa3_kv_hd128_decode_qlen120", 0.968),
+    ("fa3_kv_hd128_decode_qlen8", 1.100),
+    ("fa3_kv_hd64_decode_gqa3", 1.201),
+    ("fa3_kv_hd256_decode_mqa16", 1.055),
+    ("fa3_kv_hd128_decode_noncausal", 1.167),
+    ("fa3_kv_hd128_fp8_decode", 0.948),
+    ("fa3_kv_hd128_split2", 1.005),
+    ("fa3_kv_hd256_split_auto", 1.115),
+    ("fa3_kv_hd128_local_decode", 1.231),
+    ("fa3_kv_hd128_page1", 1.127),
+    ("fa3_kv_hd128_page4", 1.132),
+    ("fa3_kv_hd128_page128", 1.150),
+    ("fa3_kv_hd128_ctx20k", 1.054),
+    ("fa3_kv_hd128_prefill3577", 0.928),
+    ("fa3_kv_hd128_dec339", 1.190),
+    ("fa3_kv_hd128_dec1024", 1.265),
+    ("fa3_kv_hd128_dec800", 1.128),
+]
+
+# Tier colors (match the canvas: success / info / warning / danger).
+_GREEN, _BLUE, _AMBER, _RED = "#2e9e5b", "#2f6fb0", "#e0a020", "#cf4040"
+
+
+def _color(r: float) -> str:
+    if r >= 1.0:
+        return _GREEN
+    if r >= 0.95:
+        return _BLUE
+    if r >= 0.85:
+        return _AMBER
+    return _RED
+
+
+def _geomean(xs):
+    return math.exp(sum(math.log(x) for x in xs) / len(xs))
+
+
+def main() -> str:
+    rows = sorted(RESULTS, key=lambda x: x[1])   # ascending -> worst at bottom
+    names = [n for n, _ in rows]
+    vals = [v for _, v in rows]
+    colors = [_color(v) for v in vals]
+
+    gm = _geomean(vals)
+    median = sorted(vals)[len(vals) // 2]
+
+    fig, ax = plt.subplots(figsize=(9.5, 13.5))
+    y = range(len(rows))
+    ax.barh(list(y), vals, color=colors, height=0.72, zorder=3)
+
+    for yi, v in zip(y, vals):
+        ax.text(v + 0.006, yi, f"{v:.3f}\u00d7", va="center", ha="left", fontsize=7.5, color="#333")
+
+    ax.axvline(1.0, color="#888", linestyle="--", linewidth=1.2, zorder=2)
+    ax.text(1.0, len(rows) - 0.2, " parity", color="#666", fontsize=8, va="top", ha="left")
+
+    ax.set_yticks(list(y))
+    ax.set_yticklabels(names, fontsize=7.5)
+    ax.set_ylim(-0.7, len(rows) - 0.3)
+    ax.set_xlim(0.78, 1.57)
+    ax.set_xlabel("Speedup  (FA3 time / our time;  > 1 = we are faster)", fontsize=10)
+    ax.set_title(
+        f"Per-scenario speedup vs FA3 (40 scenarios, sorted)\n"
+        f"geomean {gm:.3f}\u00d7 \u00b7 median {median:.3f}\u00d7 \u00b7 40/40 correct",
+        fontsize=12, pad=12)
+    ax.grid(axis="x", color="#e6e6e6", zorder=0)
+    ax.set_axisbelow(True)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+
+    legend = [
+        Patch(color=_GREEN, label="\u22651.0\u00d7 (beat FA3)"),
+        Patch(color=_BLUE, label="0.95\u20131.0\u00d7"),
+        Patch(color=_AMBER, label="0.85\u20130.95\u00d7"),
+        Patch(color=_RED, label="<0.85\u00d7"),
+    ]
+    ax.legend(handles=legend, loc="lower right", fontsize=8, frameon=True, framealpha=0.9)
+
+    fig.tight_layout()
+    out = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "docs", "per_scenario_speedup.png")
+    fig.savefig(out, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    print(f"wrote {out}")
+    return out
+
+
+if __name__ == "__main__":
+    main()

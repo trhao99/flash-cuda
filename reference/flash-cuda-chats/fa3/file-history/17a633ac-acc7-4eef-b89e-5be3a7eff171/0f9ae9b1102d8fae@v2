@@ -1,0 +1,198 @@
+---
+name: distill-kernel
+description: >-
+  Distill a reference GPU kernel into a self-contained, dependency-free implementation that matches
+  the reference's output bit-faithfully AND its performance. Use when reimplementing a
+  CUTLASS/CuTe/library kernel (e.g. FlashAttention 3/4) in raw CUDA+PTX or cupy, porting a kernel
+  across GPU architectures (Hopper SM90 <-> Blackwell SM100), or running an NCU-guided optimization
+  loop against a reference "oracle". Encodes the trace -> confirm-in-PTX/SASS -> build-blocks ->
+  fuse -> profile -> adversarially-re-verify loop, the correctness-first dispatcher pattern, and the
+  bit-exactness discipline. Pairs with the kernel-tracer and perf-hypothesis-verifier subagents.
+---
+
+# Distill a reference GPU kernel into self-contained CUDA/cupy
+
+Reimplement a library kernel (FA3 on Hopper, FA4 on Blackwell, …) from scratch so it (1) is
+**bit-faithful** to the reference and (2) **matches or beats** its performance, with **zero**
+dependency on the reference's compute library (CUTLASS/CuTe/cupy-fusion/etc.).
+
+The reference is your **oracle**: you diff against its output *and* its generated PTX/SASS. The
+harness's speedup ratio is your **fitness function**. Every move is judged by those two numbers.
+
+This skill is architecture-agnostic. Load the matching reference pack for the target hardware:
+- Hopper / SM90 / FA3: `references/hopper-fa3.md`
+- Blackwell / SM100 / FA4: `references/blackwell-fa4.md`
+- Which pieces are portable vs arch-specific: `references/portability.md`
+
+## The one screen you must not forget
+
+This project's history is a graveyard of confident, wrong root-cause hypotheses that each cost
+multiple sessions before being overturned (search the reference packs for "WRONG"/"overturned").
+The two rules that would have saved that time:
+
+1. **Confirm in generated PTX/SASS — never trust source-reading alone.** Instruction counts,
+   `DEPBAR` ratios, `cp.async.bulk.tensor` vs `cp.async.cg`, `ex2.approx` — read them off the
+   compiled artifact.
+2. **Adversarially verify a perf hypothesis with ONE ablation before you act on it.** Delegate to
+   the `perf-hypothesis-verifier` subagent. If it can't be refuted by a cheap ablation/NCU number,
+   *then* spend a session on it. Not before.
+
+## Setup (once per target)
+
+1. **Fitness harness.** Find or build the "build-once, correctness-vs-oracle + per-config perf
+   ratio + geomean" loop. In `fa3-cuda` this is `python -m bench.eval` (`--no-perf` for correctness
+   only, `--configs a,b` for a subset). The contract: build the single deliverable once, check each
+   config vs the reference oracle *and* an fp32 reference (the "≤N× the oracle's fp32 error" rule),
+   then time candidate vs oracle interleaved with L2 flush → `ratio = oracle_ms / ours_ms`.
+   For FA4/cupy the deliverable is a `RawKernel`/JIT module, not a torch `.so`, but the contract is
+   identical — see `references/blackwell-fa4.md`.
+2. **Oracle.** The reference `.so`/module you diff output against and disassemble. For FA3:
+   `_vllm_fa3_C` in the installed vLLM; source under `reference/vllm-flash-attention/hopper`.
+3. **Arch reference pack.** Load the file above for the target. It has the validated layout math,
+   descriptors, swizzle formulas, PTX, and the *don't-retry* list.
+4. **Build flag sanity.** `wgmma` needs `-gencode arch=compute_90a,code=sm_90a` (plain `sm_90a`
+   silently resolves to `compute_90` and ptxas rejects wgmma). Blackwell `tcgen05` needs
+   `compute_100a`. See the arch pack.
+5. **Harness hygiene** (the harness owns measurement, not you): lock GPU clocks (`nvidia-smi -lgc`),
+   flush L2 between trials, warmup + median-of-N with CUDA events, `timeout`-wrap every run (config
+   corners deadlock), and pin the reference `.so`/module path in an env var (it got re-hunted 4× here).
+   Use a second GPU to overlap profiling with a regression run. Keep a **fast standalone probe**
+   (~15 s) for layout/PTX validation alongside the full build (~5 min) — the iteration-speed multiplier.
+
+## The loop
+
+Run this per target config, lowest perf ratio first.
+
+### 1. Pick the target
+From the eval output, take the worst-ratio config that isn't already on the documented
+"architectural ceiling" list. Note its exact shape/dtype/features.
+
+### 2. Trace the oracle → confirm in PTX/SASS
+Delegate to the **`kernel-tracer`** subagent: "which reference templates/atoms does THIS config
+instantiate, and what does its PTX/SASS actually contain?" It returns a structured recipe (tile
+sizes, wgmma/tcgen05 atoms, TMA descriptors, swizzle, pipeline, softmax) with source citations
+**and PTX/SASS confirmation** (instruction strings + counts). Do not proceed on source-reading
+alone. This keeps the megabytes of reference source out of your main context.
+
+### 3. Reduce to building blocks; validate each standalone, bit-exact
+Decompose into the smallest independently-testable pieces (QK GEMM, PV GEMM, TMA+mbarrier load,
+online softmax, epilogue). Build **one at a time**, each with its own correctness harness vs the
+CUTLASS/library oracle or an fp32 CPU ref, and its own perf check, **before** fusing. A component
+that isn't bit-exact standalone will never be bit-exact fused — you'll just have more surface to
+debug. (This is exactly how the FA3 oracles were built: `ptx_gemm.cu`, `tma_load.cu`,
+`softmax_test.cu`, then `fused_attn.cu`.)
+
+### 4. Fuse behind a correctness-first dispatcher
+Ship a **general fallback** that handles every feature correctly (scalar/warp path), then add fast
+paths (wgmma/tcgen05) that the host dispatcher selects **only for configs proven correct**. The
+suite stays green throughout optimization; a half-finished fast path never breaks a working config.
+Remove the fallback only when every real config provably routes to a fast path (then it's dead
+code, and dead code is where the register spills hide).
+
+### 5. Profile → form ONE hypothesis
+NCU the worst config (drive `ncu` out-of-process if the in-loop profiler segfaults on the torch
+co-process). Read: tensor-pipe %, achieved occupancy / warps_active, stall reasons
+(`long_scoreboard`, `barrier`, `wait`, `wgmma`), L2/DRAM %. For a decisive cause, PC-sample
+(`ncu --section SourceCounters --print-source sass`) and attribute stalls to specific SASS lines.
+Also profile the **oracle** with the same metrics — the side-by-side is what localizes the gap.
+`scripts/ncu_diff.sh` templates this.
+
+### 6. Adversarially verify the hypothesis BEFORE acting
+Delegate to **`perf-hypothesis-verifier`** with your hypothesis and the evidence. It tries to
+**refute** it with one cheap ablation (e.g. `-DABLATE_SM` to skip softmax and measure the GEMM-only
+ceiling; a no-load producer; toggling a single lever). Only a hypothesis that *survives* a refutation
+attempt earns a multi-step implementation. The GEMM-only-ceiling ablation in particular repeatedly
+reset this project's understanding of where the gap actually was.
+
+### 7. Implement the smallest change; re-measure; keep only wins
+Make the minimal edit the surviving hypothesis implies. Re-run `bench.eval` (correctness first, then
+perf). Keep the change only if it measurably improves the ratio without regressing correctness or
+another config. Prefer reading the reference's exact choice (tile size, fence placement, wait depth)
+over inventing one.
+
+### 8. Record the outcome
+Update memory (below). Negative results are as valuable as wins — a documented "don't retry: CN=80
+at 2 stages starves → 0.58" saves a whole future session.
+
+## The goal loop & knowing when to stop
+
+`/goal` (used heavily here) installs a session Stop hook that re-fires until a target holds (e.g.
+"every config ≥ 0.90× the reference"). Great for forcing thoroughness — but its failure mode
+dominated this project's wasted time: it **cannot self-terminate on an architectural ceiling**, so it
+ground through 7–8 dead-end attempts on one config (hd256, provably capped by the SM90 register/smem
+budget) and then re-litigated the same dead ends in the next session.
+
+So treat "this config is at a documented architectural ceiling" as a **terminal state**, not attempt
+N+1. Before another attempt on a stubborn config, ask the `perf-hypothesis-verifier`: *is this gap
+already refuted in the don't-retry ledger, and is the target physically reachable in this design?*
+If closing it needs an out-of-scope rewrite (e.g. a full CUTLASS-collective port), surface that to
+the user and stop — don't invent attempt N+1.
+
+## Hard rules (each learned expensively)
+
+- **PTX/SASS is ground truth.** Confirm every structural claim against the compiled artifact, not
+  the source. (`cuobjdump -sass`, `cuobjdump -ptx`, `nvdisasm`; `scripts/inspect_ptx.py` counts the
+  instructions that matter.)
+- **Correctness never regresses.** Route to a fast path only after it's bit-exact-verified; keep a
+  correct fallback until every config is covered. Re-run the *full* suite before declaring a win.
+- **Bit-exactness = match the reference's exact math**, not just "within tolerance":
+  `ex2.approx.ftz.f32` (the MUFU.EX2 instruction), **not** `exp2f`/`expf`; the exact online-softmax
+  rescale op-order (fp32 add is non-associative); round-nearest-even fp32→low-precision casts;
+  fold fp8 descales into the softmax scale + epilogue. Miss one → "correct within tolerance" but
+  not bit-exact.
+- **Measure, don't guess.** No perf claim without an ablation or NCU number. Before committing to a
+  multi-step direction, run the refutation (rule: `perf-hypothesis-verifier`).
+- **One component at a time, validated standalone** before fusing.
+- **Right virtual arch for the tensor-core op** (`compute_90a` / `compute_100a`), or ptxas rejects it.
+- **`wgmma`/`tcgen05` read smem through the async proxy** — a `fence.proxy.async.shared::cta` is
+  required after ordinary STS/cp.async fills and before the MMA, or you get intermittent races.
+- **Change one variable per build.** Two toggles at once (e.g. ping-pong + stage count) means a
+  regression tells you nothing — that cost real cycles here.
+- **Read before you edit.** "Does the code already do this?" caught a planned PV rewrite when the path
+  was already RS-PV. One Read beats one wasted edit+build.
+- **Profile ours AND the reference on the same shape — the diff is the gap.** Don't optimize a metric
+  already at parity. Consult the reference's *SASS* before positing a toolchain limitation: a "ptxas
+  can't do this" story survived ~10 experiments here and was false (a WAR hazard, fixed by one reorder).
+- **A subagent recipe's `confidence` = "the source says this", NOT "this will speed us up".** Its
+  #1-ranked recommendation was wrong more than once; cross-check against the *measured* bottleneck
+  (NCU stall reason) before implementing.
+
+## Separating general from architecture-specific
+
+Keep this split explicit so the FA4/Blackwell port reuses the maximum (see
+`references/portability.md`):
+
+- **Portable (reuse verbatim):** this loop; the fitness/eval contract; the correctness-first
+  dispatcher+fallback pattern; the bit-exactness discipline; online-softmax *math* (log2 domain,
+  running max/sum, LSE); the NCU hypothesis→refute→measure workflow; the memory conventions; the
+  two subagents.
+- **Arch-specific (rewrite per pack):** the MMA instruction + fragment layouts (wgmma m64nNk16 vs
+  tcgen05 + tmem), smem swizzle formulas, TMA descriptor fields, warp-specialization mechanics
+  (`setmaxnreg`, named barriers vs Blackwell equivalents), tile sizes, and the build/eval glue
+  (torch `cpp_extension` `.cu` vs cupy `RawKernel`).
+
+When a technique looks portable, put it in `references/portability.md`; when it's arch-bound, put
+it in the arch pack. FA4 work starts by copying the loop and writing a new arch pack + eval wrapper.
+
+## Subagents & workflow
+
+- **`kernel-tracer`** (read-only) — step 2. Trace + PTX/SASS-confirm one config's reference recipe.
+  Returns structured JSON/markdown; keeps reference source out of your context.
+- **`perf-hypothesis-verifier`** — step 6. Adversarially refute a perf hypothesis with one ablation
+  before you invest in it.
+- **Fan-out workflow** — when you need several reference angles read in parallel then synthesized
+  (the proven `fa3-hard-recipes` pattern: parallel schema'd `kernel-tracer`-style reads →
+  synthesize). Use the `Workflow` tool for this; it's opt-in, so only when the user wants that scale.
+
+## Memory conventions (maintain every session)
+
+Keep three living memories (project type) so sessions hand off cleanly:
+1. **`<kernel>-perf-baseline`** — latest full-suite result (geomean/median/min, N correct), the
+   configs below the target ratio, and each one's code path.
+2. **`<kernel>-dont-retry`** — every dead-end attempt with its measured result and the reason it
+   failed. Append, never delete.
+3. **`<kernel>-<specific-fix>`** — narrow, hard-won fixes (e.g. an empty-split NaN fix) worth their
+   own file.
+
+Convert relative dates to absolute. Link related memories with `[[name]]`. On a new session, read
+these first — they encode what's already known-bad so you don't rediscover it.

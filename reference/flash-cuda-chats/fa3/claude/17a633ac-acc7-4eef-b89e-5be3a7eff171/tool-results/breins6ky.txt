@@ -1,0 +1,581 @@
+===== L10 =====
+echo "=== nvcc ===" && nvcc --version 2>&1 | tail -4; echo "=== cuda home ===" && ls -d /usr/local/cuda* 2>/dev/null; echo "=== cutlass include path ===" && ls /home/yak/data-fast/agent/reference/libraries/cutlass/include/cutlass/version.h && ls -d /home/yak/data-fast/agent/reference/libraries/cutlass/include/cute 2>/dev/null; echo "=== which python / torch ===" && python3 -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)" 2>&1 | tail -2
+
+===== L21 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && CUTLASS=/home/yak/data-fast/agent/reference/libraries/cutlass && time nvcc -O3 -std=c++17 -arch=sm_90a --expt-relaxed-constexpr --expt-extended-lambda -DGEMM_MODE_QK -I "$CUTLASS/include" -I "$CUTLASS/tools/util/include" -o cutlass_gemm_qk cutlass_gemm.cu 2>&1 | tail -30
+
+===== L22 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && CUDA_VISIBLE_DEVICES=0 ./cutlass_gemm_qk 2048 2048 128 /tmp/c_cutlass_qk.bin 200 9 2>&1 | tail -5; echo "--- larger (chunk16k-ish: 16384x16384x128) ---"; CUDA_VISIBLE_DEVICES=0 ./cutlass_gemm_qk 16384 16384 128 "" 50 5 2>&1 | tail -3
+
+===== L24 =====
+cd /home/yak/data-fast/agent/reference/libraries && CUTLASS=cutlass FA=vllm-flash-attention/hopper && mkdir -p /tmp/fa3ptx && nvcc -ptx -O3 -std=c++17 -arch=sm_90a --expt-relaxed-constexpr --expt-extended-lambda -lineinfo \
+  -DFLASHATTENTION_DISABLE_BACKWARD -DFLASHATTENTION_DISABLE_DROPOUT -DFLASHATTENTION_DISABLE_APPENDKV -DFLASHATTENTION_DISABLE_SM8x -DFLASHATTENTION_DISABLE_CLUSTER -DFLASHATTENTION_DISABLE_UNEVEN_K -DFLASHATTENTION_VARLEN_ONLY -DFLASHATTENTION_PACKGQA_ONLY \
+  -I "$CUTLASS/include" -I "$CUTLASS/tools/util/include" -I "$FA" \
+  -o /tmp/fa3ptx/flash_fwd_hdim128_bf16_paged_sm90.ptx \
+  "$FA/instantiations/flash_fwd_hdim128_bf16_paged_sm90.cu" 2>/tmp/fa3ptx/build.log; echo "EXIT=$? (see /tmp/fa3ptx/build.log)"; tail -5 /tmp/fa3ptx/build.log
+
+===== L32 =====
+cd /home/yak/data-fast/agent/reference/libraries && CUTLASS=cutlass FA=vllm-flash-attention/hopper && TORCH_INC=/home/yak/miniconda3/envs/dev/lib/python3.12/site-packages/torch/include && nvcc -ptx -O3 -std=c++17 -arch=sm_90a --expt-relaxed-constexpr --expt-extended-lambda -lineinfo \
+  -DFLASHATTENTION_DISABLE_BACKWARD -DFLASHATTENTION_DISABLE_DROPOUT -DFLASHATTENTION_DISABLE_APPENDKV -DFLASHATTENTION_DISABLE_SM8x -DFLASHATTENTION_DISABLE_CLUSTER -DFLASHATTENTION_DISABLE_UNEVEN_K -DFLASHATTENTION_VARLEN_ONLY -DFLASHATTENTION_PACKGQA_ONLY \
+  -I "$CUTLASS/include" -I "$CUTLASS/tools/util/include" -I "$FA" -I "$TORCH_INC" -I "$TORCH_INC/torch/csrc/api/include" \
+  -o /tmp/fa3ptx/flash_fwd_hdim128_bf16_paged_sm90.ptx \
+  "$FA/instantiations/flash_fwd_hdim128_bf16_paged_sm90.cu" 2>/tmp/fa3ptx/build.log; echo "EXIT=$?"; tail -6 /tmp/fa3ptx/build.log; ls -la /tmp/fa3ptx/*.ptx 2>/dev/null
+
+===== L36 =====
+cd /home/yak/data-fast/agent/reference/libraries && FA=vllm-flash-attention/hopper && CUT38=vllm-flash-attention/csrc/cutlass && TORCH_INC=/home/yak/miniconda3/envs/dev/lib/python3.12/site-packages/torch/include && nvcc -ptx -O3 -std=c++17 -arch=sm_90a --expt-relaxed-constexpr --expt-extended-lambda -lineinfo \
+  -DFLASHATTENTION_DISABLE_BACKWARD -DFLASHATTENTION_DISABLE_DROPOUT -DFLASHATTENTION_DISABLE_APPENDKV -DFLASHATTENTION_DISABLE_SM8x -DFLASHATTENTION_DISABLE_CLUSTER -DFLASHATTENTION_DISABLE_UNEVEN_K -DFLASHATTENTION_VARLEN_ONLY -DFLASHATTENTION_PACKGQA_ONLY \
+  -I "$CUT38/include" -I "$CUT38/tools/util/include" -I "$FA" -I "$TORCH_INC" -I "$TORCH_INC/torch/csrc/api/include" \
+  -o /tmp/fa3ptx/flash_fwd_hdim128_bf16_paged_sm90_cut38.ptx \
+  "$FA/instantiations/flash_fwd_hdim128_bf16_paged_sm90.cu" 2>/tmp/fa3ptx/build38.log; echo "EXIT=$?"; tail -4 /tmp/fa3ptx/build38.log; ls -la /tmp/fa3ptx/*cut38*.ptx 2>/dev/null
+
+===== L40 =====
+tail -4 /home/yak/.cursor/projects/home-yak/terminals/489229.txt 2>/dev/null; echo "=== ptx? ==="; ls -la /tmp/fa3ptx/*cut38*.ptx 2>/dev/null && echo OK || echo "not yet / failed"; tail -3 /tmp/fa3ptx/build38.log 2>/dev/null
+
+===== L41 =====
+cd /home/yak/data-fast/agent && python3 -m fa3agent.cutlass_oracle.inspect_ptx ptx /tmp/fa3ptx/flash_fwd_hdim128_bf16_paged_sm90_cut38.ptx 2>&1 | sed -n '1,40p'; echo "..."; cp /tmp/fa3ptx/flash_fwd_hdim128_bf16_paged_sm90_cut38.ptx fa3agent/cutlass_oracle/ 2>/dev/null; echo "saved PTX copy"
+
+===== L43 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && nvcc -O3 -std=c++17 -arch=sm_90a --expt-relaxed-constexpr --expt-extended-lambda -o ptx_gemm ptx_gemm.cu 2>&1 | grep -vi "warning\|annotation\|inline\|\^\|Remark\|suppress" | head -20; echo "=== run small (correctness) ==="; CUDA_VISIBLE_DEVICES=0 ./ptx_gemm 128 128 128 "" 50 5 2>&1 | tail -3
+
+===== L44 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && nvcc -O3 -std=c++17 -gencode arch=compute_90a,code=sm_90a --expt-relaxed-constexpr --expt-extended-lambda -o ptx_gemm ptx_gemm.cu 2>&1 | grep -vi "warning\|annotation\|inline\|\^\|Remark\|suppress" | head -20; echo "=== run small 128x128x128 ==="; CUDA_VISIBLE_DEVICES=0 ./ptx_gemm 128 128 128 "" 50 5 2>&1 | tail -3
+
+===== L45 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && echo "=== 2048x2048x128 ===" && CUDA_VISIBLE_DEVICES=0 ./cutlass_gemm_qk 2048 2048 128 /tmp/c_cut.bin 200 9 2>&1 | tail -1 && CUDA_VISIBLE_DEVICES=0 ./ptx_gemm 2048 2048 128 /tmp/c_ptx.bin 200 9 2>&1 | tail -1; echo "=== output cross-check cutlass vs ptx ===" && python3 -c "
+import numpy as np
+a=np.fromfile('/tmp/c_cut.bin',dtype=np.float32); b=np.fromfile('/tmp/c_ptx.bin',dtype=np.float32)
+print('shapes',a.shape,b.shape,'max_abs',np.max(np.abs(a-b)),'mean_abs',np.mean(np.abs(a-b)))
+"
+
+===== L56 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && for s in "128 256 128" "256 128 128" "256 256 128" "128 128 256"; do echo -n "$s -> "; CUDA_VISIBLE_DEVICES=0 ./ptx_gemm $s "" 10 3 2>&1 | tail -1 | python3 -c "import sys,json;d=json.loads(sys.stdin.read());print('nbad',d['nbad'],'maxabs',d['max_abs_err'])"; done
+
+===== L57 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && for i in 1 2 3 4; do CUDA_VISIBLE_DEVICES=0 ./ptx_gemm 256 256 128 "" 5 2 2>&1 | tail -1 | python3 -c "import sys,json;d=json.loads(sys.stdin.read());print('run $i nbad',d['nbad'])"; done
+
+===== L77 =====
+head -n 12 /home/yak/.cursor/projects/home-yak/terminals/165790.txt /home/yak/.cursor/projects/home-yak/terminals/679932.txt 2>/dev/null; echo "=== PTX outputs ==="; ls -la /home/yak/data-fast/agent/fa3agent/cutlass_oracle/*.ptx 2>/dev/null
+
+===== L83 =====
+nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total --format=csv,noheader; echo "=== ncu ==="; which ncu && ncu --version 2>/dev/null | head -3; echo "=== nvcc ==="; nvcc --version | tail -2
+
+===== L86 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && CUDA_VISIBLE_DEVICES=0 ncu --target-processes all -k "regex:ptx_gemm_qk" -c 1 --metrics sm__throughput.avg.pct_of_peak_sustained_elapsed,gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed,l1tex__throughput.avg.pct_of_peak_sustained_elapsed,lts__throughput.avg.pct_of_peak_sustained_elapsed,sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed,sm__warps_active.avg.pct_of_peak_sustained_elapsed,launch__occupancy_limit_shared_mem,launch__occupancy_limit_registers,launch__registers_per_thread ./ptx_gemm 4096 4096 128 "" 1 1 2>&1 | grep -iE "throughput|tensor|warps_active|occupancy_limit|registers_per_thread|Duration" | head -40
+
+===== L94 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && INC="-I /home/yak/data-fast/agent/reference/libraries/cutlass/include -I /home/yak/data-fast/agent/reference/libraries/cutlass/tools/util/include"; for cfg in "128 128 64" "128 256 64" "256 128 64" "128 128 128" "256 256 64"; do read tm tn tk <<< "$cfg"; nvcc -O3 -std=c++17 -gencode arch=compute_90a,code=sm_90a --expt-relaxed-constexpr --expt-extended-lambda -DGEMM_MODE_QK -DTILE_M=$tm -DTILE_N=$tn -DTILE_K=$tk $INC -o cg_${tm}_${tn}_${tk} cutlass_gemm.cu 2>/dev/null && CUDA_VISIBLE_DEVICES=0 ./cg_${tm}_${tn}_${tk} 8192 8192 128 "" 200 7 2>&1 | tail -1 | python3 -c "import sys,json;d=json.loads(sys.stdin.read());print('tile ${tm}x${tn}x${tk}: tflops',d['tflops'])" || echo "tile ${tm}x${tn}x${tk}: build/run failed"; done
+
+===== L126 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && rm -f ptx_gemm && nvcc -O3 -std=c++17 -gencode arch=compute_90a,code=sm_90a --expt-relaxed-constexpr --expt-extended-lambda -DGEMM_MODE_PV -o ptx_gemm_pv ptx_gemm.cu 2>&1 | grep -iE "error" | head; echo "=== PV correctness (small) ==="; for s in "128 128 128" "256 256 128" "512 512 128"; do CUDA_VISIBLE_DEVICES=0 ./ptx_gemm_pv $s "" 20 3 2>&1 | tail -1; done
+
+===== L174 =====
+cd /home/yak/data-fast/agent && mkdir -p fa3agent/cutlass_oracle/results && CUDA_VISIBLE_DEVICES=1 python3 -m fa3agent.cutlass_oracle.ab_fa3 --gpu 0 2>&1 | tail -20
+
+===== L181 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && which ncu && CUDA_VISIBLE_DEVICES=1 ncu -c 2 --launch-skip 80 --metrics sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active,gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed,sm__warps_active.avg.pct_of_peak_sustained_active,smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct,smsp__warp_issue_stalled_barrier_per_warp_active.pct,smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct,launch__registers_per_thread,launch__occupancy_limit_registers,launch__occupancy_limit_shared_mem ./fused_attn 4096 128 1 2 16 5 1 2>&1 | tail -40
+
+===== L182 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && CUDA_VISIBLE_DEVICES=1 ncu -c 2 --launch-skip 10 --metrics sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active,gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed,sm__warps_active.avg.pct_of_peak_sustained_active,smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct,smsp__warp_issue_stalled_barrier_per_warp_active.pct,smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct,smsp__warp_issue_stalled_wait_per_warp_active.pct,launch__registers_per_thread,launch__occupancy_limit_registers,launch__occupancy_limit_shared_mem ./fused_attn 4096 128 1 2 16 30 1 2>&1 | tail -45
+
+===== L188 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && nvcc -O3 -std=c++17 -DPIPE -gencode arch=compute_90a,code=sm_90a --expt-relaxed-constexpr --expt-extended-lambda -o fused_attn_pipe fused_attn.cu 2>&1 | tail -20 && echo "=== correctness + perf ===" && CUDA_VISIBLE_DEVICES=1 ./fused_attn_pipe 2048 128 1 1 1 50 5 && for a in "2048 128 1 8 16" "4096 128 1 2 16" "8192 128 1 2 16"; do CUDA_VISIBLE_DEVICES=1 ./fused_attn_pipe $a 50 7; done
+
+===== L205 =====
+nvcc -O3 -std=c++17 -gencode arch=compute_90a,code=sm_90a --expt-relaxed-constexpr --expt-extended-lambda -DOVL -o fused_attn_ovl fused_attn.cu 2>&1 | tail -20 && echo "BUILD_OK"
+
+===== L212 =====
+CUDA_VISIBLE_DEVICES=0 ncu --launch-skip 40 --launch-count 1 --metrics sm__throughput.avg.pct_of_peak_sustained_elapsed,gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed,sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed,sm__warps_active.avg.pct_of_peak_sustained_elapsed,smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_wait_per_issue_active.ratio,smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio ./fused_attn_ovl 4096 128 1 1 16 1 1 2>&1 | tail -30
+
+===== L219 =====
+CUDA_VISIBLE_DEVICES=0 ncu --launch-skip 40 --launch-count 1 --metrics sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed,sm__throughput.avg.pct_of_peak_sustained_elapsed,sm__warps_active.avg.pct_of_peak_sustained_elapsed,smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_wait_per_issue_active.ratio,smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio,smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio ./fused_attn_ovl 4096 128 1 1 16 1 1 2>&1 | tail -20
+
+===== L228 =====
+nvcc -O3 -std=c++17 -gencode arch=compute_90a,code=sm_90a --expt-relaxed-constexpr --expt-extended-lambda -DVTRANS -o fused_attn_vt fused_attn.cu 2>&1 | tail -4 && echo "=== lbo128/sbo256 ===" && CUDA_VISIBLE_DEVICES=0 ./fused_attn_vt 256 128 0 1 1 10 2; CUDA_VISIBLE_DEVICES=0 ./fused_attn_vt 512 128 1 1 1 10 2
+
+===== L238 =====
+cd /home/yak/data-fast/agent && CUDA_VISIBLE_DEVICES=1 python3 -m fa3agent.cutlass_oracle.ab_fa3 --gpu 0 2>&1 | tail -20
+
+===== L244 =====
+echo "=== default ===" && nvcc -O3 -std=c++17 -gencode arch=compute_90a,code=sm_90a --expt-relaxed-constexpr --expt-extended-lambda -o /tmp/fa_def fused_attn.cu 2>&1 | grep -v C7513 | tail -2; CUDA_VISIBLE_DEVICES=0 /tmp/fa_def 1024 128 1 1 1 10 2; echo "=== PIPE ===" && nvcc -O3 -std=c++17 -gencode arch=compute_90a,code=sm_90a --expt-relaxed-constexpr --expt-extended-lambda -DPIPE -o /tmp/fa_pipe fused_attn.cu 2>&1 | grep -v C7513 | tail -2; CUDA_VISIBLE_DEVICES=0 /tmp/fa_pipe 1024 128 1 1 1 10 2; echo "=== OVL canonical ===" && CUDA_VISIBLE_DEVICES=0 ./fused_attn 1024 128 1 1 1 10 2
+
+===== L280 =====
+cd /home/yak/data-fast/agent && CUDA_VISIBLE_DEVICES=0 python3 -m fa3agent.cutlass_oracle.ab_fa3 --gpu 0 --bin /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels/fused_attn_ws 2>&1 | tail -20
+
+===== L281 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && which ncu && timeout 200 env CUDA_VISIBLE_DEVICES=0 ncu --launch-skip 20 --launch-count 1 --section SpeedOfLight --section WarpStateStats --metrics sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active,sm__warps_active.avg.pct_of_peak_sustained_active,launch__occupancy_limit_registers,launch__occupancy_limit_shared_mem ./fused_attn_ws 4096 128 1 1 16 1 1 2>&1 | tail -55
+
+===== L288 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && timeout 200 env CUDA_VISIBLE_DEVICES=0 ncu --launch-skip 20 --launch-count 1 --section SpeedOfLight --section WarpStateStats --metrics sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active,sm__warps_active.avg.pct_of_peak_sustained_active ./fused_attn_wso 4096 128 1 1 16 1 1 2>&1 | rg -i "tensor_op_hmma|warps_active|Compute \(SM\)|Memory Through|DRAM Through|L2 Cache Through|Warp Cycles Per Issued|stalled|scoreboard|barrier|Duration" | head -40
+
+===== L306 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && echo "=== build canonical fused_attn = WSO ===" && nvcc -O3 -std=c++17 -gencode arch=compute_90a,code=sm_90a --expt-relaxed-constexpr --expt-extended-lambda -DWSO -o fused_attn fused_attn.cu 2>&1 | rg -v "^$" | head -3; echo "=== rebuild OVL (shared helpers changed) ===" && nvcc -O3 -std=c++17 -gencode arch=compute_90a,code=sm_90a --expt-relaxed-constexpr --expt-extended-lambda -DOVL -o fused_attn_ovl fused_attn.cu 2>&1 | rg "error" | head; echo "=== verify both correct ===" && for b in fused_attn fused_attn_ovl; do echo "-- $b --"; timeout 30 env CUDA_VISIBLE_DEVICES=0 ./$b 2048 128 1 1 4 20 3; done
+
+===== L307 =====
+cd /home/yak/data-fast/agent && CUDA_VISIBLE_DEVICES=0 python3 -m fa3agent.cutlass_oracle.ab_fa3 --gpu 0 2>&1 | tail -8
+
+===== L315 =====
+cd /home/yak/data-fast/agent && timeout 240 env CUDA_VISIBLE_DEVICES=0 ncu --launch-skip 50 --launch-count 1 --section SpeedOfLight --metrics sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active,sm__warps_active.avg.pct_of_peak_sustained_active,launch__occupancy_limit_registers,launch__occupancy_limit_shared_mem,launch__registers_per_thread,launch__shared_mem_per_block_static,launch__shared_mem_per_block_dynamic python3 -m fa3agent.cutlass_oracle.prof_fa3 1 16 4096 40 3 2>&1 | rg -i "void |flash|fwd|tensor_op_hmma|warps_active|Compute \(SM\)|Memory Through|DRAM Through|L2 Cache Through|Duration|occupancy_limit|registers_per_thread|shared_mem_per_block" | head -40
+
+===== L319 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle && echo "=== FA3 wgmma count & forms ===" && rg -c "wgmma.mma_async" flash_fwd_hdim128_bf16_paged_sm90_cut38.ptx; echo "--- distinct wgmma shapes ---"; rg -o "wgmma.mma_async[a-z0-9.]*" flash_fwd_hdim128_bf16_paged_sm90_cut38.ptx | sort | uniq -c; echo "--- sample QK/PV wgmma w/ operands (first 2) ---"; rg -n "wgmma.mma_async" flash_fwd_hdim128_bf16_paged_sm90_cut38.ptx | head -2; echo "--- fence/commit/wait counts ---"; for p in "wgmma.fence" "wgmma.commit_group" "wgmma.wait_group" "setmaxnreg" "cp.async.bulk.tensor" "cp.async.ca" "cp.async.cg" "mbarrier" "bar.sync" "bar.arrive"; do printf "%-28s %s\n" "$p" "$(rg -c -- "$p" flash_fwd_hdim128_bf16_paged_sm90_cut38.ptx)"; done
+
+===== L320 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && timeout 200 env CUDA_VISIBLE_DEVICES=0 ncu -o /tmp/wso_rep -f --set full --launch-skip 20 --launch-count 1 ./fused_attn_wso_li 4096 128 1 1 16 1 1 >/dev/null 2>&1; echo "rep done rc=$?"; ncu -i /tmp/wso_rep.ncu-rep --page source --print-source yes 2>/dev/null | rg -i "stall|long_score|sampling" | head -5; echo "=== try details stall metrics by killing ==="; ncu -i /tmp/wso_rep.ncu-rep --page details 2>/dev/null | rg -i "long scoreboard|stall|excessively" | head -20
+
+===== L321 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && ncu -i /tmp/wso_rep.ncu-rep --page source --csv 2>/dev/null > /tmp/src.csv; echo "rows: $(wc -l < /tmp/src.csv)"; head -1 /tmp/src.csv | tr ',' '\n' | cat -n | rg -i "stall|sample|address|source|line" | head; echo "=== top long-scoreboard lines ==="; python3 - <<'PY'
+import csv
+rows=list(csv.DictReader(open('/tmp/src.csv')))
+if not rows:
+    print("no rows"); raise SystemExit
+# find columns
+cols=rows[0].keys()
+lsb=[c for c in cols if 'long_scoreboard' in c.lower()]
+src=[c for c in cols if c.lower() in ('source','address') or 'line' in c.lower() or 'file' in c.lower()]
+print("lsb cols:",lsb); print("src cols:",src)
+key=lsb[0] if lsb else None
+if key:
+    def num(x):
+        try: return float(x.replace(',',''))
+        except: return 0.0
+    rs=sorted(rows,key=lambda r:num(r.get(key,'0')),reverse=True)[:12]
+    for r in rs:
+        loc=" | ".join(str(r.get(c,'')) for c in src)
+        print(f"{num(r.get(key,'0')):12.0f}  {loc}")
+PY
+
+===== L329 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle && ls -la kernels/ && echo "=== TMA refs in trace §8 ===" && rg -n "tma|TMA|swizzle|SWIZZLE|bulk.tensor|tensormap|CUtensorMap|cuTensorMap" --glob '!*.ptx' . | head -40
+
+===== L342 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && CUT=/home/yak/data-fast/agent/reference/libraries/cutlass/include && nvcc -O2 -std=c++17 -I$CUT --expt-relaxed-constexpr -o swz_probe swz_probe.cu 2>&1 | rg -i "error|cutlass/bfloat" | head -20; echo "rc=${PIPESTATUS[0]}"; ls -la swz_probe 2>/dev/null && ./swz_probe 2>&1 | head -20
+
+===== L371 =====
+nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader 2>&1; echo "---nvcc---"; which nvcc; nvcc --version 2>&1 | tail -2
+
+===== L372 =====
+nvcc -gencode arch=compute_90a,code=sm_90a -O3 -std=c++17 -lcuda tma_swz_test.cu -o /tmp/tma_swz_test 2>&1 | tail -20 && echo "=== RUN ===" && CUDA_VISIBLE_DEVICES=0 /tmp/tma_swz_test
+
+===== L388 =====
+cd /home/yak/data-fast/agent && CUDA_VISIBLE_DEVICES=0 python3 -m fa3agent.cutlass_oracle.ab_fa3 --gpu 0 --bin fa3agent/cutlass_oracle/kernels/fused_attn_wso 2>&1
+
+===== L401 =====
+nvcc -gencode arch=compute_90a,code=sm_90a -O3 -std=c++17 -lcuda tma_swz_test_v.cu -o /tmp/tma_swz_test_v 2>&1 | tail -25 && echo "=== RUN ===" && CUDA_VISIBLE_DEVICES=0 /tmp/tma_swz_test_v
+
+===== L426 =====
+nvcc -gencode arch=compute_90a,code=sm_90a -O3 -std=c++17 -lcuda -DWST fused_attn.cu -o /tmp/fused_attn_wst 2>&1 | tail -30 && echo "BUILD_DONE"
+
+===== L428 =====
+nvcc -gencode arch=compute_90a,code=sm_90a -O3 -std=c++17 -lcuda -DWST fused_attn.cu -o fused_attn_wst 2>&1 | grep -v "C7520\|C7513\|C7511" | tail -5; echo "built"; cd /home/yak/data-fast/agent && CUDA_VISIBLE_DEVICES=0 python3 -m fa3agent.cutlass_oracle.ab_fa3 --gpu 0 --bin fa3agent/cutlass_oracle/kernels/fused_attn_wst 2>&1
+
+===== L437 =====
+nvcc -gencode arch=compute_90a,code=sm_90a -O3 -std=c++17 -lcuda -DWSTP fused_attn.cu -o /tmp/fused_attn_wstp 2>&1 | grep -v "C7520\|C7513\|C7511" | tail -10; echo "BUILD_DONE"; echo "== causal small ==" && CUDA_VISIBLE_DEVICES=0 /tmp/fused_attn_wstp 1024 128 1 1 2 20 3; echo "== causal big ==" && CUDA_VISIBLE_DEVICES=0 /tmp/fused_attn_wstp 4096 128 1 4 16 50 7; echo "== noncausal ==" && CUDA_VISIBLE_DEVICES=0 /tmp/fused_attn_wstp 2048 128 0 8 16 50 7
+
+===== L444 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && ncu --metrics sm__throughput.avg.pct_of_peak_sustained_elapsed,sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed,smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio,smsp__average_warps_issue_stalled_wait_per_issue_active.ratio,sm__warps_active.avg.pct_of_peak_sustained_active,l1tex__throughput.avg.pct_of_peak_sustained_elapsed,lts__throughput.avg.pct_of_peak_sustained_elapsed --launch-skip 20 --launch-count 1 -f -o /tmp/wst_prof env CUDA_VISIBLE_DEVICES=0 ./fused_attn_wst 4096 128 1 1 8 30 1 2>&1 | tail -5; echo "=== summary ==="; ncu -i /tmp/wst_prof.ncu-rep --page details 2>/dev/null | grep -iE "Tensor|Compute \(SM\)|Memory|Achieved Occ|long_scoreboard|barrier|^.*wait |Duration" | head -40
+
+===== L445 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && ncu --metrics sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed,smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio,smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_wait_per_issue_active.ratio,sm__warps_active.avg.pct_of_peak_sustained_active --launch-skip 100 --launch-count 1 -f -o /tmp/wst_prof2 env CUDA_VISIBLE_DEVICES=0 ./fused_attn_wst 4096 128 1 4 16 5 1 2>&1 | tail -2; echo "=== WST steady-state (causal 4096 B4H16) ==="; ncu -i /tmp/wst_prof2.ncu-rep --page details 2>/dev/null | grep -iE "tensor_op_hmma|long_scoreboard|_barrier_|short_scoreboard|stalled_wait|warps_active" | sed 's/^ *//'
+
+===== L450 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && nvcc -gencode arch=compute_90a,code=sm_90a -O3 -std=c++17 -lcuda -DWST -DNOPP fused_attn.cu -o /tmp/fused_attn_wst_nopp 2>&1 | grep -v "C7520\|C7513\|C7511\|C7519" | tail -3; echo BUILT; echo "== NOPP causal 4096 B4H16 =="; CUDA_VISIBLE_DEVICES=0 /tmp/fused_attn_wst_nopp 4096 128 1 4 16 50 7; echo "== PP(ref) causal 4096 B4H16 =="; CUDA_VISIBLE_DEVICES=0 /tmp/fused_attn_wst 4096 128 1 4 16 50 7
+
+===== L461 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels
+echo "=== build sanity (WSO baseline, WST, WSTP, +NOPP) ==="
+for flags in "-DWSO" "-DWST" "-DWSTP" "-DWST -DNOPP" "-DWSTP -DNOPP"; do
+  nvcc -gencode arch=compute_90a,code=sm_90a -O3 -std=c++17 -lcuda $flags fused_attn.cu -o /tmp/sanity 2>&1 | grep -iE "error" | head -3 && echo "  [$flags] ERROR" || echo "  [$flags] ok"
+done
+echo "=== final correctness/perf: WSTP+NOPP ==="
+CUDA_VISIBLE_DEVICES=0 /tmp/fused_attn_wstp_nopp 2048 128 1 2 8 30 5 2>/dev/null | sed 's/.*"tflops"/causal   tflops/; s/, "LSE.*//'
+CUDA_VISIBLE_DEVICES=0 /tmp/fused_attn_wstp_nopp 2048 128 0 2 8 30 5 2>/dev/null | sed 's/.*"tflops"/noncausal tflops/; s/, "LSE.*//'
+
+===== L482 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && nvcc -O3 -gencode arch=compute_90a,code=sm_90a -DWST -DNOPP -o fused_attn_wst_nopp fused_attn.cu -lcuda 2>&1 | grep -iE "error|warning: .*wgmma|C7520|C7519|C7513" | head; echo "=== build done, dumping SASS ==="; cuobjdump -sass fused_attn_wst_nopp 2>/dev/null | grep -iE "WGMMA|WARPGROUP|^\s+/\*[0-9a-f]+\*/\s+BAR|ARRIVE|DEPBAR" | grep -iE "WGMMA|WARPGROUP|BAR|ARRIVE|DEPBAR" | head -80
+
+===== L483 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && cuobjdump -sass fused_attn_wst_nopp 2>/dev/null | sed -n '/fused_attn_fwd_wst[^p]/,/fused_attn_fwd_wstp/p' > /tmp/wst.sass; wc -l /tmp/wst.sass; echo "=== window around first HGMMA in mainloop ==="; grep -nE "HGMMA|WARPGROUP|DEPBAR|LDSM|MOVM|R2UR|UMOV|^\s+/\*[0-9a-f]+\*/\s+[A-Z]" /tmp/wst.sass | grep -A2 -B2 "HGMMA" | head -60
+
+===== L484 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && cuobjdump -sass cutlass_gemm_qk 2>/dev/null | grep -nE "HGMMA|WARPGROUP|DEPBAR|R2UR|UIADD|UMOV.*UR" | head -50
+
+===== L497 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && grep -nE "HGMMA|WARPGROUP|DEPBAR|R2UR|UIADD|UMOV|ULDC|MOV " /tmp/wst2.sass | grep -B1 -A4 "HGMMA" | head -50
+
+===== L512 =====
+cd /tmp && SO=/home/yak/.cache/uv/archive-v0/92T5zh5f4XE-rStt_DJJj/vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so; cuobjdump -sass "$SO" 2>/dev/null > /tmp/fa3_all.sass; wc -l /tmp/fa3_all.sass; echo "=== global HGMMA vs DEPBAR ==="; echo "HGMMA=$(grep -c HGMMA /tmp/fa3_all.sass)  DEPBAR=$(grep -c DEPBAR /tmp/fa3_all.sass)"; echo "=== sample window: HGMMA + following 3 lines ==="; grep -A3 "HGMMA.64x" /tmp/fa3_all.sass | head -40
+
+===== L523 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && grep -nE "HGMMA.64x|DEPBAR|R2UR|UIADD3 UR|UMOV UR|SHFL" /tmp/wst4.sass | sed -n '1,24p'
+
+===== L526 =====
+cd /home/yak/data-fast/agent && python -m fa3agent.cutlass_oracle.ab_fa3 --gpu 0 --bin fa3agent/cutlass_oracle/kernels/fused_attn_wst_nopp 2>&1 | tail -12
+
+===== L530 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && nvcc -O3 -gencode arch=compute_90a,code=sm_90a -DWST -o fused_attn_wst fused_attn.cu -lcuda 2>&1 | grep -iE "error" | head; echo "built WST (ping-pong)"; cd /home/yak/data-fast/agent && python -m fa3agent.cutlass_oracle.ab_fa3 --gpu 0 --bin fa3agent/cutlass_oracle/kernels/fused_attn_wst --shapes 4,16,4096 2>&1 | tail -3
+
+===== L531 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && echo "=== fused_attn_fwd_wst: between two HGMMA (raw) ==="; awk '/HGMMA.64x/{c++} c>=2 && c<=4' /tmp/wst4.sass | sed -n '1,12p'; echo "=== cutlass_gemm_pv (RS, reference) HGMMA/DEPBAR ==="; cuobjdump -sass cutlass_gemm_pv 2>/dev/null | grep -cE "HGMMA"; cuobjdump -sass cutlass_gemm_pv 2>/dev/null | grep -cE "DEPBAR"; echo "--- pv window ---"; cuobjdump -sass cutlass_gemm_pv 2>/dev/null | grep -A2 "HGMMA" | head -18
+
+===== L542 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && grep -nE "HGMMA.64x|DEPBAR|WARPGROUP.ARRIVE|R2UR|UIADD3 UR|LDS|STS" /tmp/wst5.sass | sed -n '1,20p'; echo "=== registers used ==="; cuobjdump -res-usage fused_attn_wst_nopp 2>/dev/null | grep -A3 "fwd_wst[^p]" | head
+
+===== L558 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && grep -nE "HGMMA|DEPBAR|WARPGROUP.ARRIVE" /tmp/wst6.sass | head -40
+
+===== L575 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && grep -nE "HGMMA|DEPBAR|R2UR|WARPGROUP.ARRIVE" /tmp/diag.sass | sed -n '14,40p'
+
+===== L582 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && grep -nE "HGMMA" /tmp/diag2.sass | sed -n '16,22p'
+
+===== L596 =====
+cd /home/yak && timeout 20 python3 -c "import vllm_flash_attn, os; print(os.path.dirname(vllm_flash_attn.__file__))" 2>&1; echo "---ab_fa3 import---"; grep -rnE "import|\.so|flash_attn_interface|_C" /home/yak/data-fast/agent/fa3agent/cutlass_oracle/ab_fa3.py 2>/dev/null | head -20
+
+===== L601 =====
+FA=/home/yak/miniconda3/envs/dev/lib/python3.12/site-packages/vllm_flash_attn/_vllm_fa3_C.abi3.so; ls -la $FA 2>/dev/null && echo "FOUND"; echo "=== list fwd kernels (cuobjdump elf headers) ==="; cuobjdump -elf $FA 2>/dev/null | grep -iE "\.text\..*hdim128.*bf16|\.text\..*fwd" | head -30
+
+===== L604 =====
+cd /home/yak/miniconda3/envs/dev/lib/python3.12/site-packages/fa3_fwd && cuobjdump -symbols _C.abi3.so 2>/dev/null | grep -iE "STT_FUNC" | grep -iE "hdim128|128.*[Bb]f16|flash_fwd" | grep -ivE "split|combine|paged|append" | head -20
+
+===== L605 =====
+cd /home/yak/miniconda3/envs/dev/lib/python3.12/site-packages/fa3_fwd && cuobjdump -symbols _C.abi3.so 2>/dev/null | head -5; echo "=== count ==="; cuobjdump -symbols _C.abi3.so 2>/dev/null | wc -l
+
+===== L607 =====
+cd /home/yak/miniconda3/envs/dev/lib/python3.12/site-packages/fa3_fwd && cuobjdump -symbols _C.abi3.so 2>/dev/null | awk '/STT_FUNC/{print $NF}' | grep -E "device_kernel" | grep -E "FlashAttnFwd[^C]" | grep -iE "hdim128|Li128" | head -8 | cat -n
+
+===== L608 =====
+cd /home/yak/miniconda3/envs/dev/lib/python3.12/site-packages/fa3_fwd && SYM=$(cuobjdump -symbols _C.abi3.so 2>/dev/null | awk '/STT_FUNC/{print $NF}' | grep -E "device_kernel" | grep -E "FlashAttnFwdSm90INS1_25CollectiveMainloopFwdSm90ILi2E" | grep -E "StaticPersistentTileSchedulerILb0EEE" | grep -vE "Varlen|Dynamic" | head -1); echo "SYM len: ${#SYM}"; cuobjdump -sass -fun "$SYM" _C.abi3.so 2>/dev/null > /tmp/fa3.sass; echo "lines: $(wc -l < /tmp/fa3.sass)"; echo "HGMMA: $(grep -c HGMMA /tmp/fa3.sass)  DEPBAR: $(grep -c DEPBAR /tmp/fa3.sass)  WG.ARRIVE: $(grep -c 'WARPGROUP.ARRIVE' /tmp/fa3.sass)  R2UR: $(grep -c R2UR /tmp/fa3.sass)"
+
+===== L609 =====
+cd /home/yak/miniconda3/envs/dev/lib/python3.12/site-packages/fa3_fwd && grep -nE "HGMMA|DEPBAR|WARPGROUP|wgmma" /tmp/fa3.sass | head -60
+
+===== L627 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && grep -nE "HGMMA" /tmp/wstD.sass | sed -n '20,28p'
+
+===== L636 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && grep -nE "HGMMA.64x128x16.F32.BF16 R24, gdesc" /tmp/wstE.sass | head -3; echo "--- region ---"; awk 'NR>=3700 && NR<=3760' /tmp/wstE.sass | grep -E "/\*[0-9a-f]{4}\*/" | sed -E 's/\/\* 0x.*//' | head -40
+
+===== L650 =====
+nvcc --version 2>&1 | grep -iE "release|Build"; echo "=== FA3 built with ==="; ls /home/yak/miniconda3/envs/dev/lib/python3.12/site-packages/ | grep -iE "flash_attn-|fa3_fwd-" ; echo "=== which ptxas ==="; which ptxas; ptxas --version 2>&1 | grep -i release
+
+===== L654 =====
+cd /tmp; echo "=== FA3 HGMMA descriptor usage (first 40 HGMMA lines + surrounding desc compute) ==="; grep -nE "HGMMA|GMMA|UIADD3.64|UIMAD|DEPBAR" fa3.sass | head -60
+
+===== L666 =====
+cd /tmp; echo "=== first QK batch in cute.sass ==="; grep -nE "HGMMA.64x128x16.F32.BF16 R[0-9]+, gdesc" cute.sass | head -10; echo "=== DEPBAR positions (sample) ==="; grep -nE "HGMMA|DEPBAR|UIADD3.64|R2UR" cute.sass | head -40
+
+===== L676 =====
+cd /tmp; echo "FA3:  R2UR: $(grep -c R2UR fa3.sass)  SHFL: $(grep -c SHFL fa3.sass)  ULDC: $(grep -c ULDC fa3.sass)  HGMMA: $(grep -c HGMMA fa3.sass)  DEPBAR: $(grep -c DEPBAR fa3.sass)"; echo "=== how FA3 produces uniform base (ULDC / UIMAD context near first desc) ==="; sed -n '495,535p' fa3.sass | grep -vE "^\s*/\* 0x" 
+
+===== L681 =====
+cd /tmp; echo "cute.sass SHFL count: $(grep -c SHFL cute.sass)"; echo "=== SHFL.IDX (lane-0 broadcast = uniform_u32) occurrences ==="; grep -nE "SHFL.IDX" cute.sass | head; echo "=== what feeds R6 (desc base) just before first steady HGMMA? search R2UR UR16 sources ==="; grep -nE "R2UR UR1[67]|VIADD R4|LOP3.LUT R6" cute.sass | head -8
+
+===== L684 =====
+cd /tmp; echo "=== cb.sass: instructions around steady-state HGMMA (find a representative QK run) ==="; grep -nE "HGMMA.64x128x16.F32.BF16 R24, gdesc" cb.sass | sed -n '8,12p'; echo "--- detail around line ---"; sed -n '3700,3770p' cb.sass | grep -vE "^\s+/\* 0x"
+
+===== L687 =====
+cd /tmp; echo "=== prologue QK-only region (first ~12 HGMMA) ==="; awk 'NR>=1 && NR<=400 && /HGMMA|DEPBAR|WARPGROUP.ARRIVE|wgmma/' cb.sass | head -30; echo "=== count DEPBAR in first 400 lines (prologue) ==="; awk 'NR<=400 && /DEPBAR/' cb.sass | wc -l; awk 'NR<=400 && /HGMMA/' cb.sass | wc -l
+
+===== L688 =====
+cd /tmp; echo "=== first 16 HGMMA + DEPBAR with line numbers (cb.sass, const QK base) ==="; grep -nE "HGMMA|DEPBAR" cb.sass | head -24
+
+===== L692 =====
+cd /home/yak/data-fast/agent/fa3agent && python -m fa3agent.cutlass_oracle.ab_fa3 --gpu 1 --shapes 4,16,4096 2>&1 | tail -6
+
+===== L693 =====
+cd /home/yak/data-fast/agent && python -m fa3agent.cutlass_oracle.ab_fa3 --gpu 1 --shapes 4,16,4096 2>&1 | tail -6
+
+===== L698 =====
+cd /tmp; echo "=== exact mangled function names in fused_attn binary ==="; cuobjdump -sass /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels/fused_attn 2>/dev/null | grep -E "Function :" | head -20
+
+===== L699 =====
+cd /tmp; cat > /tmp/fcount.sh <<'EOF'
+#!/bin/bash
+BIN="$1"; FN="$2"
+cuobjdump -sass "$BIN" 2>/dev/null | awk -v fn="$FN" '
+  /Function :/ { inf = ($0 ~ fn) ? 1 : 0 }
+  inf { print }
+' > /tmp/_fn.sass
+echo "  HGMMA=$(grep -c HGMMA /tmp/_fn.sass) DEPBAR=$(grep -c DEPBAR /tmp/_fn.sass) R2UR=$(grep -c R2UR /tmp/_fn.sass) WG.ARRIVE=$(grep -c 'WARPGROUP.ARRIVE' /tmp/_fn.sass)"
+EOF
+chmod +x /tmp/fcount.sh
+echo "=== current clean build (fused_attn), wst function ==="; /tmp/fcount.sh /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels/fused_attn fused_attn_wst
+echo "=== const-base build (/tmp/fa_cb2), wst function ==="; /tmp/fcount.sh /tmp/fa_cb2 fused_attn_wst
+
+===== L704 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && echo "=== ptxas warnings (verbose) for wst ==="; nvcc -O3 -gencode arch=compute_90a,code=sm_90a -DWST -DNOPP -Xptxas -v -c fused_attn.cu -o /tmp/fa.o 2>&1 | grep -iE "C75|serializ|fused_attn_fwd_wst" | head -20; echo "=== PTX: count wgmma ops in wst fn ==="; nvcc -O3 -gencode arch=compute_90a,code=sm_90a -DWST -DNOPP -ptx fused_attn.cu -o /tmp/fa.ptx 2>/dev/null; awk '/\.visible \.entry _Z18fused_attn_fwd_wst/{f=1} f&&/\.visible \.entry/&&!/wst14/{if(seen)exit} {if(f)print}' /tmp/fa.ptx > /tmp/wst.ptx; echo "wgmma.fence=$(grep -c 'wgmma.fence' /tmp/wst.ptx)  wgmma.mma_async=$(grep -c 'wgmma.mma_async' /tmp/wst.ptx)  commit=$(grep -c 'wgmma.commit' /tmp/wst.ptx)  wait=$(grep -c 'wgmma.wait' /tmp/wst.ptx)"
+
+===== L706 =====
+cd /tmp; cuobjdump -sass /tmp/fa_cb2 2>/dev/null | awk '/Function :/{inf=($0~/fused_attn_fwd_wst14/)?1:0} inf' > /tmp/wstfn.sass; echo "lines: $(wc -l </tmp/wstfn.sass)"; echo "=== first QK batch (8 HGMMA) with ALL instructions between ==="; awk '/HGMMA/{c++} c>=1 && c<=4' /tmp/wstfn.sass | grep -vE "^\s+/\* 0x" | head -40
+
+===== L707 =====
+ptxas --help 2>&1 | grep -iE "wgmma|warpgroup|schedul|register|expensive|spill|maxreg" | head -20
+
+===== L708 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && for lvl in 5 10; do nvcc -O3 -gencode arch=compute_90a,code=sm_90a -DWST -DNOPP -Xptxas --register-usage-level=$lvl -o /tmp/fa_rul$lvl fused_attn.cu -lcuda 2>&1 | grep -iE "error"|head; echo "reg-usage-level=$lvl:"; /tmp/fcount.sh /tmp/fa_rul$lvl "fused_attn_fwd_wst14"; done; echo "=== + expensive opt ==="; nvcc -O3 -gencode arch=compute_90a,code=sm_90a -DWST -DNOPP -Xptxas --register-usage-level=10 -Xptxas --allow-expensive-optimizations=true -o /tmp/fa_exp fused_attn.cu -lcuda 2>&1|grep -iE error|head; /tmp/fcount.sh /tmp/fa_exp "fused_attn_fwd_wst14"
+
+===== L719 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && which ncu 2>/dev/null && ncu --version 2>&1 | head -2 || echo "no ncu in PATH"; ls /usr/local/cuda/bin/ncu 2>/dev/null || echo "no ncu in cuda bin"
+
+===== L720 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && CUDA_VISIBLE_DEVICES=1 ncu --kernel-name regex:"fused_attn_fwd_wst14" --launch-count 1 --metrics sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active,sm__pipe_fma_cycles_active.avg.pct_of_peak_sustained_active,sm__inst_executed_pipe_xu.avg.pct_of_peak_sustained_active,smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio,smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_wait_per_issue_active.ratio ./fused_attn 4096 128 1 4 16 50 1 2>&1 | grep -E "pipe_tensor|pipe_fma|pipe_xu|stalled_barrier|short_scoreboard|stalled_wait" | head -20
+
+===== L724 =====
+cd /tmp && nvcc -O3 -gencode arch=compute_90a,code=sm_90a -c wtest.cu -o wtest.o 2>&1 | grep -iE "error|C7513"|head; echo "=== MINE: 8 hand-wgmma ==="; cuobjdump -sass wtest.o 2>/dev/null | awk '/Function :/{inf=($0~/mine/)?1:0} inf' | grep -cE "HGMMA"; echo "HGMMA ^ / DEPBAR v"; cuobjdump -sass wtest.o 2>/dev/null | awk '/Function :/{inf=($0~/mine/)?1:0} inf' | grep -cE "DEPBAR"
+
+===== L728 =====
+cd /tmp && nvcc -O3 -gencode arch=compute_90a,code=sm_90a -Xptxas -v -c wtest.cu -o wtest.o 2>&1 | grep -iE "registers|C7513"|head; echo "=== mine (no pressure) ==="; cuobjdump -sass wtest.o 2>/dev/null|awk '/Function :/{inf=($0~/_Z4mine/&&$0!~/pressure/)?1:0} inf'|grep -cE "HGMMA"; cuobjdump -sass wtest.o 2>/dev/null|awk '/Function :/{inf=($0~/_Z4mine/&&$0!~/pressure/)?1:0} inf'|grep -cE "DEPBAR"; echo "=== mine_pressure ==="; cuobjdump -sass wtest.o 2>/dev/null|awk '/Function :/{inf=($0~/pressure/)?1:0} inf'|grep -cE "HGMMA"; cuobjdump -sass wtest.o 2>/dev/null|awk '/Function :/{inf=($0~/pressure/)?1:0} inf'|grep -cE "DEPBAR"
+
+===== L729 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && /tmp/fcount.sh /tmp/fa_abl "fused_attn_fwd_wst14"; echo "(ABLATE_SM above)"; echo "--- check: is consumer_regs/setmaxnreg in the wst SASS? ---"; cuobjdump -sass /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels/fused_attn 2>/dev/null | awk '/Function :/{inf=($0~/fused_attn_fwd_wst14/)?1:0} inf' | grep -cE "ARRIVE|DEPBAR|HGMMA|R2UR|UMOV.*0x"
+
+===== L731 =====
+cd /tmp && nvcc -O3 -gencode arch=compute_90a,code=sm_90a -c wtest.cu -o wtest.o 2>&1 | grep -iE "C7513"|head -1; echo "=== mine_realdesc (uniform_u32+make_smem_desc+qk_doff) ==="; cuobjdump -sass wtest.o 2>/dev/null|awk '/Function :/{inf=($0~/realdesc/)?1:0} inf'|grep -cE "HGMMA"; cuobjdump -sass wtest.o 2>/dev/null|awk '/Function :/{inf=($0~/realdesc/)?1:0} inf'|grep -cE "DEPBAR"
+
+===== L736 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && cuobjdump -sass fused_attn 2>/dev/null | awk '/Function :/{inf=($0~/fused_attn_fwd_wst14/)?1:0} inf' > /tmp/real_wst.sass; echo "real wst: distinct UR count = $(grep -oE 'UR[0-9]+' /tmp/real_wst.sass | sort -u | wc -l)"; echo "max UR = $(grep -oE 'UR[0-9]+' /tmp/real_wst.sass | sort -t R -k2 -n | tail -1)"; echo "total instrs ~ $(grep -cE '/\*[0-9a-f]+\*/' /tmp/real_wst.sass)"; echo "--- my isolated urpress UR usage ---"; cuobjdump -sass /tmp/wtest.o 2>/dev/null|awk '/Function :/{inf=($0~/urpress/)?1:0} inf' > /tmp/iso.sass; echo "iso urpress: distinct UR = $(grep -oE 'UR[0-9]+' /tmp/iso.sass|sort -u|wc -l), max = $(grep -oE 'UR[0-9]+' /tmp/iso.sass|sort -tR -k2 -n|tail -1)"
+
+===== L737 =====
+cd /tmp; echo "=== real wst: first 10 HGMMA/DEPBAR (prologue qk_gemm_sw = pure QK, commit/wait/fence) ==="; grep -nE "HGMMA|DEPBAR" real_wst.sass | head -16
+
+===== L738 =====
+cd /tmp; cuobjdump -sass /tmp/fa_abl 2>/dev/null | awk '/Function :/{inf=($0~/fused_attn_fwd_wst14/)?1:0} inf' > /tmp/abl_wst.sass; echo "ABLATE_SM wst: instrs=$(grep -cE '/\*[0-9a-f]+\*/' abl_wst.sass) distinctUR=$(grep -oE 'UR[0-9]+' abl_wst.sass|sort -u|wc -l) maxUR=$(grep -oE 'UR[0-9]+' abl_wst.sass|sort -tR -k2 -n|tail -1) HGMMA=$(grep -c HGMMA abl_wst.sass) DEPBAR=$(grep -c DEPBAR abl_wst.sass)"; echo "real(full) wst: instrs=$(grep -cE '/\*[0-9a-f]+\*/' real_wst.sass)"
+
+===== L740 =====
+cd /tmp && nvcc -O3 -gencode arch=compute_90a,code=sm_90a -c wtest.cu -o wtest.o 2>&1 | grep -iE "C7513|C7520"|head -2; echo "=== mine_urpress (+ warp-specialization + setmaxnreg) ==="; cuobjdump -sass wtest.o 2>/dev/null|awk '/Function :/{inf=($0~/urpress/)?1:0} inf' > /tmp/iso2.sass; echo "HGMMA=$(grep -c HGMMA iso2.sass) DEPBAR=$(grep -c DEPBAR iso2.sass) distinctUR=$(grep -oE 'UR[0-9]+' iso2.sass|sort -u|wc -l) maxUR=$(grep -oE 'UR[0-9]+' iso2.sass|sort -tR -k2 -n|tail -1)"
+
+===== L758 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && for f in "PIPE" "OVL" ""; do nm=${f:-BASIC}; nvcc -O3 -gencode arch=compute_90a,code=sm_90a ${f:+-D$f} -o /tmp/fa_$nm fused_attn.cu -lcuda 2>&1 | grep -iE "error"|head -2; echo -n "$nm: "; /tmp/fa_$nm 4096 128 1 4 16 100 5 2>&1 | grep '{' | sed 's/.*median_ms/median_ms/'; done
+
+===== L759 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && nvcc -O3 -gencode arch=compute_90a,code=sm_90a -DWS -o /tmp/fa_ws fused_attn.cu -lcuda 2>&1 | grep -iE "error"|head -2; echo -n "WS (warp-spec, async, cp.async loads): "; /tmp/fa_ws 4096 128 1 4 16 100 5 2>&1 | grep '{' | sed 's/.*min_ms/min_ms/'; echo "DEPBAR check:"; /tmp/fcount.sh /tmp/fa_ws "fused_attn_fwd_wsP"
+
+===== L764 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader 2>/dev/null; echo "---build wst NOPP---"; nvcc -O3 -gencode arch=compute_90a,code=sm_90a -DWST -DNOPP -o /tmp/fa_wst_nopp fused_attn.cu -lcuda 2>&1 | grep -iE "error"|head; echo -n "wst NOPP perf: "; /tmp/fa_wst_nopp 4096 128 1 4 16 100 5 2>&1 | grep '{' | sed 's/.*min_ms/min_ms/'
+
+===== L765 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && which ncu && ncu --version 2>&1 | head -3
+
+===== L766 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && ncu --launch-skip 60 --launch-count 1 --metrics smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio,smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_wait_per_issue_active.ratio,smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio,smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio,sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active,sm__warps_active.avg.pct_of_peak_sustained_active,sm__throughput.avg.pct_of_peak_sustained_active /tmp/fa_wst_nopp 4096 128 1 4 16 100 5 2>&1 | grep -iE "stalled|hmma_cycles|warps_active|throughput.avg|Duration" | sed 's/  */ /g'
+
+===== L768 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && grep -nE "WS_STAGES|NumCons|NThreadsWS|NThreads |#define WG |producer_regs|consumer_regs|setmaxnreg" fused_attn.cu | head -30; echo "---regs/smem---"; cuobjdump -res-usage /tmp/fa_wst_nopp 2>/dev/null | grep -iE "fused_attn_fwd_wst\b|reg|smem" | head -20
+
+===== L784 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && nvcc -O3 -gencode arch=compute_90a,code=sm_90a -DWST -DSEQB -o /tmp/fa_seqb_pp fused_attn.cu -lcuda 2>&1 | grep -iE "error"|head -2; echo "SEQB+pingpong DEPBAR:"; /tmp/fcount.sh /tmp/fa_seqb_pp "fused_attn_fwd_wst14"; echo -n "SEQB+pingpong perf: "; /tmp/fa_seqb_pp 4096 128 1 4 16 100 5 2>&1 | grep '{' | sed 's/.*min_ms/min_ms/'
+
+===== L797 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && nvcc -O3 -gencode arch=compute_90a,code=sm_90a -DWSTP -DSEQB -DNOPP -o /tmp/fa_wstp_seqb_nopp fused_attn.cu -lcuda 2>&1 | grep -iE "error"|head -3; echo -n "wstp SEQB NOPP: "; timeout 60 /tmp/fa_wstp_seqb_nopp 4096 128 1 4 16 100 5 2>&1 | grep '{' | sed 's/.*min_ms/min_ms/'
+
+===== L817 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && for f in "" "WST -DSEQB" "WSTP -DSEQB" "WST -DNOPP"; do nm=$(echo "${f:-BASIC}" | tr ' -' '__'); out=$(nvcc -O3 -gencode arch=compute_90a,code=sm_90a $(for x in $f; do echo -n "-D$x "; done) -o /tmp/sanity_$nm fused_attn.cu -lcuda 2>&1 | grep -iE "error" | head -2); echo "[${f:-BASIC}]: ${out:-OK}"; done
+
+===== L818 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && echo -n "[BASIC] "; nvcc -O3 -gencode arch=compute_90a,code=sm_90a -o /tmp/s1 fused_attn.cu -lcuda 2>&1 | grep -iE error | head -1 || true; echo OK; echo -n "[WST SEQB] "; nvcc -O3 -gencode arch=compute_90a,code=sm_90a -DWST -DSEQB -o /tmp/s2 fused_attn.cu -lcuda 2>&1 | grep -iE error | head -1 || true; echo OK; echo -n "[WSTP SEQB] "; nvcc -O3 -gencode arch=compute_90a,code=sm_90a -DWSTP -DSEQB -o /tmp/s3 fused_attn.cu -lcuda 2>&1 | grep -iE error | head -1 || true; echo OK; echo -n "[WSO] "; nvcc -O3 -gencode arch=compute_90a,code=sm_90a -DWSO -o /tmp/s4 fused_attn.cu -lcuda 2>&1 | grep -iE error | head -1 || true; echo OK; echo "--- production binary check ---"; ls -la fused_attn; /tmp/fcount.sh fused_attn "fused_attn_fwd_wst14"
+
+===== L839 =====
+cd /tmp && SO=/home/yak/miniconda3/envs/dev/lib/python3.12/site-packages/vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so; ls -la $SO; echo "--- arch present ---"; cuobjdump --list-elf $SO 2>/dev/null | head -5; echo "--- count sm90 cubins ---"; cuobjdump $SO 2>/dev/null | grep -c "arch = sm_90a" || true
+
+===== L840 =====
+cd /tmp && SO=/home/yak/miniconda3/envs/dev/lib/python3.12/site-packages/vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so; cuobjdump -sass $SO 2>/dev/null | grep -aE "Function :" | c++filt 2>/dev/null | grep -iE "fwd" | grep -iE "128" | grep -viE "bwd|kBlockH|sparse|append|combine" | head -20
+
+===== L842 =====
+cd /tmp && python3 - <<'PY'
+import re
+blocks=[]
+cur=None; name=None
+hg=db=0
+def flush():
+    if cur is not None and ('FlashAttnFwdSm90' in name):
+        blocks.append((name,hg,db))
+with open('/tmp/fa3_all.sass','r',errors='ignore') as f:
+    for line in f:
+        if 'Function :' in line:
+            # flush previous
+            if cur is not None and 'FlashAttnFwdSm90' in name:
+                blocks.append((name,hg,db))
+            name=line.strip(); cur=True; hg=db=0
+        else:
+            if 'HGMMA' in line: hg+=1
+            if 'DEPBAR' in line: db+=1
+    if cur is not None and 'FlashAttnFwdSm90' in name:
+        blocks.append((name,hg,db))
+# filter hd128 bf16 tile 128,128,128
+def short(n):
+    m=re.search(r'CollectiveMainloopFwdSm90<([^>]*?)cute::tuple<cute::C<(\d+)>, cute::C<(\d+)>, cute::C<(\d+)> >, (\d+), cutlass::bfloat16_t',n)
+    return m
+cands=[]
+for name,hg,db in blocks:
+    m=short(name)
+    if not m: continue
+    M,N,K,hd=m.group(2),m.group(3),m.group(4),m.group(5)
+    if hd=='128' and M=='128' and N=='128' and K=='128' and hg>0:
+        # extract trailing bool flags right after Sm90,
+        fl=re.search(r'cutlass::arch::Sm90, ([a-z, ]+?), cutlass::bfloat16_t',
+
+===== L843 =====
+cd /tmp && python3 - <<'PY'
+blocks=[]
+name=None; hg=db=0; started=False
+def flush():
+    global blocks,name,hg,db
+    if started and 'FlashAttnFwdSm90' in name:
+        blocks.append((name,hg,db))
+with open('/tmp/fa3_all.sass','r',errors='ignore') as f:
+    for line in f:
+        if 'Function :' in line:
+            flush()
+            name=line.strip(); hg=db=0; started=True
+        else:
+            if 'HGMMA' in line: hg+=1
+            if 'DEPBAR' in line: db+=1
+flush()
+key='cute::tuple<cute::C<128>, cute::C<128>, cute::C<128> >, 128, cutlass::bfloat16_t'
+cands=[]
+for name,hg,db in blocks:
+    if key in name and hg>0:
+        i=name.find('cutlass::arch::Sm90, ')
+        flags=name[i+21:i+21+70] if i>0 else '?'
+        cands.append((hg,db,flags))
+print("hd128 bf16 tile(128,128,128) FlashAttnFwd kernels:")
+for hg,db,flags in sorted(set(cands)):
+    print(f"  HGMMA={hg:5d} DEPBAR={db:5d} ratio={db/hg:.3f}  [{flags}]")
+print("count:",len(set(cands)))
+PY
+
+===== L844 =====
+cd /tmp && python3 - <<'PY'
+import subprocess
+blocks=[]
+name=None; hg=db=0; started=False
+def flush():
+    global blocks,name,hg,db
+    if started: blocks.append((name,hg,db))
+with open('/tmp/fa3_all.sass','r',errors='ignore') as f:
+    for line in f:
+        if 'Function :' in line:
+            flush(); name=line.split('Function :')[1].strip(); hg=db=0; started=True
+        else:
+            if 'HGMMA' in line: hg+=1
+            if 'DEPBAR' in line: db+=1
+flush()
+print("total blocks:",len(blocks))
+print("sample name:", blocks[0][0][:120])
+fwd=[(n,h,d) for (n,h,d) in blocks if 'FlashAttnFwd' in n and h>0]
+print("fwd blocks w/ HGMMA:",len(fwd))
+# histogram of ratio
+import collections
+buck=collections.Counter()
+for n,h,d in fwd:
+    r=d/h
+    buck[round(r,1)]+=1
+print("ratio histogram (DEPBAR/HGMMA) over fwd kernels:")
+for k in sorted(buck): print(f"  {k:.1f}: {buck[k]}")
+# show a few with HGMMA in [120,160] (typical hd128 with several k-iters)
+print("examples:")
+for n,h,d in sorted(fwd,key=lambda x:-x[1])[:6]:
+    dem=subprocess.run(['c++filt'],input=n,capture_output=True,text=True).stdout
+    tile=''
+    if 'C<128>, cute::C<128>, cute::C<128>' in dem: tile='TILE128x128x128'
+    pri
+
+===== L846 =====
+cd /tmp && python3 - <<'PY'
+import subprocess
+def demangle(n):
+    return subprocess.run(['c++filt'],input=n,capture_output=True,text=True).stdout
+# collect blocks as (name, start_idx_in_list_of_lines)
+target=None
+with open('/tmp/fa3_all.sass','r',errors='ignore') as f:
+    cur=[]; nm=None; chosen=None; chosen_lines=None
+    for line in f:
+        if 'Function :' in line:
+            if nm is not None:
+                hg=sum('HGMMA' in x for x in cur); db=sum('DEPBAR' in x for x in cur)
+                if chosen is None and hg>100:
+                    dem=demangle(nm)
+                    if ('C<128>, cute::C<128>, cute::C<128>' in dem and '128, cutlass::bfloat16_t' in dem
+                        and 'Combine' not in dem and db/max(hg,1)<0.2):
+                        chosen=nm; chosen_lines=cur
+            nm=line.split('Function :')[1].strip(); cur=[line]
+        else:
+            cur.append(line)
+    # tail
+print("chosen async hd128 kernel:")
+print(demangle(chosen)[:300] if chosen else "NONE")
+if chosen:
+    with open('/tmp/fa3_hd128.sass','w') as o: o.writelines(chosen_lines)
+    hg=sum('HGMMA' in x for x in chosen_lines); db=sum('DEPBAR' in x for x in chosen_lines)
+    print(f"H
+
+===== L847 =====
+cd /tmp && python3 - <<'PY'
+import subprocess
+def dem(n): return subprocess.run(['c++filt'],input=n,capture_output=True,text=True).stdout
+chosen=None; chosen_lines=None
+def consider(nm,cur):
+    global chosen,chosen_lines
+    if chosen is not None: return
+    hg=sum('HGMMA' in x for x in cur); db=sum('DEPBAR' in x for x in cur)
+    if hg>100 and db/max(hg,1)<0.2:
+        d=dem(nm)
+        if 'FlashAttnFwd' in d and 'bfloat16_t' in d and 'Combine' not in d:
+            chosen=nm; chosen_lines=cur
+with open('/tmp/fa3_all.sass','r',errors='ignore') as f:
+    cur=[]; nm=None
+    for line in f:
+        if 'Function :' in line:
+            if nm is not None: consider(nm,cur)
+            nm=line.split('Function :')[1].strip(); cur=[line]
+        else: cur.append(line)
+    if nm is not None: consider(nm,cur)
+if chosen:
+    with open('/tmp/fa3_hd128.sass','w') as o: o.writelines(chosen_lines)
+    print(dem(chosen)[:260])
+    hg=sum('HGMMA' in x for x in chosen_lines); db=sum('DEPBAR' in x for x in chosen_lines)
+    print(f"HGMMA={hg} DEPBAR={db} lines={len(chosen_lines)}")
+else: print("NONE")
+PY
+ls -la /tmp/fa3_hd128.sass 2>/dev/null
+
+===== L848 =====
+cd /tmp && grep -n "HGMMA\|DEPBAR\|UIADD3\|R2UR\|WARPGROUP\|ARRIVE\|MOVM\|UMOV" /tmp/fa3_hd128.sass | head -80
+
+===== L851 =====
+cd /tmp && cuobjdump -sass -fun "_Z18fused_attn_fwd_wst14CUtensorMap_stS_S_P13__nv_bfloat16Pfiifi" /tmp/fa_cute 2>/dev/null > /tmp/mine_wst.sass; echo "lines:"; wc -l < /tmp/mine_wst.sass; echo "--- first HGMMA cluster with context ---"; grep -n "HGMMA\|DEPBAR\|gdesc\|ARRIVE" /tmp/mine_wst.sass | head -40
+
+===== L862 =====
+cd /tmp && nvcc -O3 -gencode arch=compute_90a,code=sm_90a -o /tmp/two_group two_group.cu 2>&1 | grep -iE "C7513|error" | head -3; echo "=== isolated 2-group DEPBAR ==="; cuobjdump -sass /tmp/two_group 2>/dev/null | grep -cE "HGMMA"; echo -n "DEPBAR: "; cuobjdump -sass /tmp/two_group 2>/dev/null | grep -cE "DEPBAR"; echo "--- gdesc usage ---"; cuobjdump -sass /tmp/two_group 2>/dev/null | grep -oE "gdesc\[UR[0-9]+\]" | sort | uniq -c
+
+===== L863 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && grep -nE "setmaxnreg|consumer_regs|producer_regs|NThreadsWS|launch_bounds" fused_attn.cu | head -20; echo "=== ptxas -v for wst (regs) ==="; nvcc -O3 -gencode arch=compute_90a,code=sm_90a -DWST -DNOPP -DCUTE -Xptxas -v -c fused_attn.cu -o /tmp/fa.o 2>&1 | grep -iE "fused_attn_fwd_wst14|registers" | head -8
+
+===== L869 =====
+cd /tmp && nvcc -O3 -gencode arch=compute_90a,code=sm_90a -Xptxas -v -o /tmp/tgl two_group_loop.cu 2>&1 | grep -iE "C7513|error|registers" | head -4; echo "=== 2-group LOOP (carried acc_o/P + softmax) ==="; echo -n "HGMMA: "; cuobjdump -sass /tmp/tgl 2>/dev/null | grep -cE "HGMMA"; echo -n "DEPBAR: "; cuobjdump -sass /tmp/tgl 2>/dev/null | grep -cE "DEPBAR"
+
+===== L876 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && for FLAGS in "-DWST" "-DWST -DCUTE"; do echo "=== $FLAGS ==="; nvcc -O3 -gencode arch=compute_90a,code=sm_90a $FLAGS -o /tmp/fa_t fused_attn.cu -lcuda 2>&1 | grep -ciE "C7513.*wst14" | sed 's/^/C7513_wst_count: /'; /tmp/fcount.sh /tmp/fa_t "fused_attn_fwd_wst14"; timeout 60 /tmp/fa_t 4096 128 1 4 16 100 5 2>&1 | grep '{' | sed 's/.*min_ms/  min_ms/'; done
+
+===== L877 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle && ls ab_fa3.py 2>/dev/null && head -40 ab_fa3.py | grep -iE "usage|argv|argparse|def main|python|--" | head -20
+
+===== L878 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle && grep -nE "argparse|add_argument|FUSED_BIN|--bin|nvcc|build|compile|\.cu" ab_fa3.py | head -30
+
+===== L881 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && export CUDA_VISIBLE_DEVICES=0; for FLAGS in "-DWST" "-DWST -DNOPP" "-DWST -DCUTE" "-DWST -DCUTE -DNOPP" "-DWST -DSEQB" "-DWST -DSEQB -DNOPP"; do nvcc -O3 -gencode arch=compute_90a,code=sm_90a $FLAGS -o /tmp/fa_s fused_attn.cu -lcuda 2>/dev/null; R=$(timeout 60 /tmp/fa_s 4096 128 1 4 16 200 7 2>&1 | grep '{' | sed 's/.*"min_ms/min_ms/'); echo "$FLAGS => $R"; done
+
+===== L882 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && nvcc -O3 -gencode arch=compute_90a,code=sm_90a -DWST -DCUTE -o fused_attn fused_attn.cu -lcuda 2>/dev/null; echo "built -DWST -DCUTE"; cd /home/yak/data-fast/agent && timeout 300 python -m fa3agent.cutlass_oracle.ab_fa3 --gpu 0 2>&1 | tail -8
+
+===== L883 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && export CUDA_VISIBLE_DEVICES=0; which ncu >/dev/null 2>&1 && echo "ncu found" || echo "no ncu"; timeout 150 ncu --set basic --kernel-name-base demangled -k "regex:fused_attn_fwd_wst" -c 1 --metrics sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active,sm__throughput.avg.pct_of_peak_sustained_elapsed,smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio,smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio,sm__warps_active.avg.pct_of_peak_sustained_active ./fused_attn 4096 128 1 4 16 50 1 2>&1 | grep -iE "tensor_op_hmma|sm__throughput|stalled_barrier|short_scoreboard|warps_active" | head -20
+
+===== L886 =====
+cd /home/yak/data-fast/agent && export CUDA_VISIBLE_DEVICES=0; timeout 200 ncu --launch-skip 5 --launch-count 1 --kernel-name-base demangled -k "regex:FlashAttnFwd" --metrics sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active,sm__throughput.avg.pct_of_peak_sustained_elapsed,smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio,smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio,sm__warps_active.avg.pct_of_peak_sustained_active python /tmp/run_fa3.py 2>&1 | grep -iE "tensor_op_hmma|sm__throughput|stalled_barrier|short_scoreboard|warps_active" | head -20
+
+===== L891 =====
+cd /home/yak/data-fast/agent/fa3agent/cutlass_oracle/kernels && export CUDA_VISIBLE_DEVICES=0; for FLAGS in "-DWSTP -DCUTE" "-DWSTP -DCUTE -DNOPP"; do nvcc -O3 -gencode arch=compute_90a,code=sm_90a $FLAGS -o /tmp/fa_p fused_attn.cu -lcuda 2>&1 | grep -ciE "C7513.*wstp" | sed 's/^/  C7513_wstp: /'; R=$(timeout 60 /tmp/fa_p 4096 128 1 4 16 200 7 2>&1 | grep '{' | sed 's/.*"min_ms/min_ms/'); echo "$FLAGS => $R"; done
+

@@ -1,0 +1,23 @@
+# Built torch-extension libs (kernel sources under kernels/ are tracked at any depth)
+*.so
+
+# In-loop trial build scratch (throwaway .so + objects)
+.fa3_trials/
+
+
+# PTX / SASS dumps, profiler reports
+*.ptx
+*.sass
+*.ncu-rep
+*.nsys-rep
+*.cubin
+*.o
+
+# Large reference tensors
+*.bin
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

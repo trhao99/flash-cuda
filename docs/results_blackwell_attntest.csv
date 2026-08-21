@@ -1,0 +1,65 @@
+scenario,bar,phase,dtype,head_dim,status,ours_x,cudnn_x,fi_x,base_us,cand_us,cudnn_us,fi_us,err_ratio,note
+attn_dense_hd64_causal,Dense causal,prefill,bf16,64,OK,1.4862,1.4020,1.0464,102.18,68.75,72.88,97.65,1,
+attn_dense_hd96_causal,Dense causal,prefill,bf16,96,OK,0.9963,1.3256,,104.56,104.94,78.88,,1,
+attn_dense_hd128_causal,Dense causal,prefill,bf16,128,OK,1.3764,1.3923,1.0186,110.40,80.21,79.30,108.38,1,
+attn_dense_hd192_causal,Dense causal,prefill,bf16,192,"UNSUP({ours, FA4, FlashInfer})",,,,,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=192 hdv=192 paged=0 dtype=BFloat16"
+attn_dense_hd256_causal,Dense causal,prefill,bf16,256,UNSUP({ours}),,3.7389,4.2230,592.30,,158.42,140.26,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=256 hdv=256 paged=0 dtype=BFloat16"
+attn_dense_hd128_noncausal,Dense features,prefill,bf16,128,OK,1.2581,1.5125,1.0518,123.71,98.34,81.79,117.62,1.017,
+attn_dense_hd128_nc4k,Dense features,prefill,bf16,128,OK,0.9872,1.1742,0.9612,266.43,269.89,226.91,277.18,1,
+attn_dense_hd128_gqa,Dense features,prefill,bf16,128,OK,1.3504,1.3403,0.9680,103.97,76.99,77.57,107.41,1,
+attn_dense_hd128_mqa,Dense features,prefill,bf16,128,OK,1.3559,1.3455,0.9674,103.50,76.34,76.93,106.99,1,
+attn_dense_hd128_fp16,Dense features,prefill,fp16,128,OK,1.3820,1.3874,1.0060,109.57,79.28,78.98,108.91,1,
+attn_dense_hd128_fp8,FP8,prefill,fp8e4m3,128,"UNSUP({ours, cuDNN, FlashInfer})",,,,119.06,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=128 hdv=128 paged=0 dtype=Float8_e4m3"
+attn_dense_hd128_softcap,Dense features,prefill,bf16,128,OK,2.4971,,,429.42,171.97,,,1.149,
+attn_dense_hd128_local,Dense features,prefill,bf16,128,OK,1.2055,1.2047,0.9706,92.37,76.62,76.67,95.17,1,
+attn_dense_hd128_oddseq,Dense features,prefill,bf16,128,OK,1.9133,1.5971,1.0191,54.74,28.61,34.27,53.71,0.9244,
+attn_dense_hd128_seq256,Dense causal,prefill,bf16,128,OK,1.7963,1.7114,0.9756,54.46,30.32,31.82,55.82,1,
+attn_dense_hd128_large4k,Dense long,prefill,bf16,128,OK,1.1046,1.2795,0.8568,166.46,150.70,130.10,194.29,1,
+attn_dense_hd128_splits3,Dense features,prefill,bf16,128,OK,1.3470,1.3262,0.9598,103.23,76.64,77.84,107.55,1,
+attn_varlen_hd128_causal,Variable-length,prefill,bf16,128,OK,1.6325,1.2331,0.9974,55.01,33.70,44.61,55.15,1.311,
+attn_varlen_hd128_noncausal,Variable-length,prefill,bf16,128,OK,1.7546,1.2228,0.9726,53.31,30.38,43.60,54.82,1.536,
+attn_varlen_hd64_causal,Variable-length,prefill,bf16,64,OK,1.7826,1.1724,0.9892,52.99,29.73,45.20,53.57,1.01,
+attn_varlen_hd128_mqa,Variable-length,prefill,bf16,128,OK,1.5742,1.1977,0.9783,54.18,34.42,45.23,55.38,1.457,
+attn_kv_hd128_decode_mha,KV decode,decode,bf16,128,OK,,,,,,,,0.0002905, (no-baseline)
+attn_kv_hd128_decode_gqa5,KV decode,decode,bf16,128,OK,,,,,,,,0.00031, (no-baseline)
+attn_kv_hd128_decode_mqa32,KV decode,decode,bf16,128,OK,,,,,,,,0.0006239, (no-baseline)
+attn_kv_hd128_decode_qlen120,KV decode,decode,bf16,128,OK,,,,,,,,0.0005319, (no-baseline)
+attn_kv_hd128_decode_qlen8,KV decode,decode,bf16,128,OK,,,,,,,,0.0003331, (no-baseline)
+attn_kv_hd64_decode_gqa3,KV decode,decode,bf16,64,OK,,,,,,,,0.0003015, (no-baseline)
+attn_kv_hd256_decode_mqa16,KV decode,decode,bf16,256,"UNSUP({ours, FA4})",,,,,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=256 hdv=256 paged=1 dtype=BFloat16"
+attn_kv_hd128_decode_noncausal,KV decode,decode,bf16,128,OK,2.0939,2.5747,1.0998,94.54,45.15,36.72,85.97,0.8237,
+attn_kv_hd128_fp8_decode,FP8,decode,fp8e4m3,128,"UNSUP({ours, FA4, cuDNN, FlashInfer})",,,,,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=128 hdv=128 paged=1 dtype=Float8_e4m3"
+attn_kv_hd128_split2,KV features,decode,bf16,128,OK,,,,,,,,0.0002791, (no-baseline)
+attn_kv_hd256_split_auto,KV features,decode,bf16,256,"UNSUP({ours, FA4})",,,,,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=256 hdv=256 paged=1 dtype=BFloat16"
+attn_kv_hd128_local_decode,KV features,decode,bf16,128,OK,,,,,,,,0.0008331, (no-baseline)
+attn_kv_hd128_decode_gqa9,KV decode,decode,bf16,128,OK,,,,,,,,0.0003695, (no-baseline)
+attn_kv_hd128_decode_gqa7,KV decode,decode,bf16,128,OK,,,,,,,,0.0003266, (no-baseline)
+attn_kv_hd128_decode_128k_splitkv,KV features,decode,bf16,128,OK,,,,,,,,7.367e-05, (no-baseline)
+attn_kv_hd128_page1,KV features,decode,bf16,128,OK,,,,,,,,0.0004451, (no-baseline)
+attn_kv_hd128_page4,KV features,decode,bf16,128,OK,,,,,,,,0.0004451, (no-baseline)
+attn_kv_hd128_page128,KV features,decode,bf16,128,OK,,,,,,,,0.0004451, (no-baseline)
+attn_kv_hd128_ctx20k,KV features,prefill,bf16,128,OK,,,,,,,,0.0001497, (no-baseline)
+attn_kv_hd128_prefill3577,KV features,prefill,bf16,128,OK,1.0455,1.3156,0.9561,134.53,128.67,102.26,140.70,1.43,
+attn_kv_hd128_dec339,KV features,decode,bf16,128,OK,1.4209,1.6896,1.0890,53.47,37.63,31.65,49.10,0.8712,
+attn_kv_hd128_dec1024,KV features,decode,bf16,128,OK,,,,,,,,0.0007987, (no-baseline)
+attn_kv_hd128_dec800,KV features,decode,bf16,128,OK,,,,,,,,0.001055, (no-baseline)
+attn_dense_hd192_dv128,Dense features,prefill,bf16,192,OK,1.3495,1.3607,,130.74,96.88,96.08,,1,
+attn_varlen_hd192_dv128,Variable-length,prefill,bf16,192,OK,1.5636,1.1622,,54.69,34.98,47.06,,1.051,
+attn_dense_hd64_fp16,Dense features,prefill,fp16,64,OK,1.4766,1.4142,1.0382,101.33,68.62,71.65,97.60,1,
+attn_dense_hd192_fp16,Dense features,prefill,fp16,192,"UNSUP({ours, FA4, FlashInfer})",,,,,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=192 hdv=192 paged=0 dtype=Half"
+attn_dense_hd128_fp8_gqa,FP8,prefill,fp8e4m3,128,"UNSUP({ours, cuDNN, FlashInfer})",,,,114.02,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=128 hdv=128 paged=0 dtype=Float8_e4m3"
+attn_varlen_hd128_fp8,FP8,prefill,fp8e4m3,128,"UNSUP({ours, cuDNN, FlashInfer})",,,,62.98,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=128 hdv=128 paged=0 dtype=Float8_e4m3"
+attn_kv_hd128_fp16_decode,KV features,decode,fp16,128,OK,,,,,,,,3.824e-05, (no-baseline)
+attn_kv_hd64_fp8_decode,FP8,decode,fp8e4m3,64,"UNSUP({ours, FA4, cuDNN, FlashInfer})",,,,,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=64 hdv=64 paged=1 dtype=Float8_e4m3fn"
+attn_dense_hd256_fp8,FP8,prefill,fp8e4m3,256,"UNSUP({ours, FA4, cuDNN, FlashInfer})",,,,,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=256 hdv=256 paged=0 dtype=Float8_e4m3"
+attn_kv_hd256_fp8_decode,FP8,decode,fp8e4m3,256,"UNSUP({ours, FA4, cuDNN, FlashInfer})",,,,,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=256 hdv=256 paged=1 dtype=Float8_e4m3"
+attn_dense_hd128_kgtq,Dense features,prefill,bf16,128,OK,1.7208,1.6214,0.9850,58.86,34.21,36.30,59.76,1.157,
+attn_dense_hd128_deg_q239k1,Dense features,prefill,bf16,128,OK,1.9727,,1.0000,53.25,26.99,,53.25,,
+attn_dense_hd128_local_noncausal,Dense features,prefill,bf16,128,OK,1.1714,1.1939,,103.65,88.48,86.82,,0.8454,
+attn_varlen_hd128_local,Variable-length,prefill,bf16,128,OK,1.5958,1.1981,1.0052,55.46,34.75,46.29,55.17,1.311,
+attn_dense_hd128_softcap_gqa,Dense features,prefill,bf16,128,OK,2.0948,,,357.79,170.80,,,0.9019,
+attn_dense_hd128_sink,Dense features,prefill,bf16,128,OK,1.3088,1.3964,0.9398,112.22,85.74,80.37,119.41,1,
+attn_varlen_hd128_sink,Variable-length,prefill,bf16,128,OK,1.3793,1.1832,0.8179,54.46,39.49,46.03,66.59,1,
+attn_kv_hd128_leftpad,KV features,decode,bf16,128,OK,,,,,,,,0.0004015, (no-baseline)
+attn_dense_hd128_seq8k,Dense long,prefill,bf16,128,OK,0.9309,1.1044,0.8419,492.96,529.55,446.35,585.55,1,
+attn_dense_hd128_seq16k,Dense long,prefill,bf16,128,OK,0.8785,1.0552,0.7769,896.13,1020.08,849.26,1153.44,1,

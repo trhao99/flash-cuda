@@ -1,0 +1,4 @@
+# Memory Index
+
+- [FA3 perf gap closing](fa3-perf-gap-closing.md) — how FA3 beats us on paged decode/prefill + fp8 hd256, and the fixes that worked
+- [FA3-cuda eval harness](fa3-cuda-eval-harness.md) — build/eval/profile commands for fa3_hopper.cu vs vLLM FA3

@@ -1,0 +1,47 @@
+---
+name: fa3-perf-baseline
+description: fa3_fwd.cu speedup-vs-FA3 baseline (2026-06-24) + which scenarios are below the 0.90x goal and their code paths
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: c4987da0-9b92-4860-a389-7d95f1c5d56f
+---
+
+Baseline measured 2026-06-24 on H200 GPU0 (`python -m bench.eval`), AFTER fixing the page128 NaN bug. 40/40 correct, geomean 1.067x.
+
+**Scenarios below 0.90x goal (ratio = FA3_time/our_time, >1 = we win):**
+- fa3_dense_hd128_large4k 0.818 — bf16 hd128 persist-ring prefill (q4096), K/V-handshake bound
+- fa3_dense_hd128_fp8 0.820 — native fp8 persist-ring prefill; P round-trips through smem (SS-PV) vs FA3 register-resident P
+- fa3_dense_hd256_causal 0.844 — per-tile prefill, CN=48 STAGES=3 (smem cap 227KB); FA3 uses CN=80
+- fa3_kv_hd128_fp8_decode 0.872 — fp8 decode-split (cp.async)
+- fa3_dense_hd192_causal 0.885 — per-tile prefill, CN=64 STAGES=3; FA3 uses CN=96
+- fa3_kv_hd128_prefill3577 0.887 — paged chunked-prefill (per-tile, not persist; paged)
+- fa3_dense_hd128_softcap 0.890 — hd128 persist EXTRA mask path
+
+**FA3's tile sizes (reference/vllm-flash-attention/hopper/tile_size.h, tile_size_fwd_sm90 returns {CM,CN,MmaPV_is_RS,IntraWGOverlap}):**
+- hd128 causal: {128,128,true,true}; noncausal {128,160}
+- hd192 causal: {128,96,true,true} (we use CN=64)
+- hd256 causal: {128,80,true,true} (we use CN=48)
+- fp8 hd128 prefill (two-level accum): {128,192,true,true}
+- ALL paths MmaPV_is_RS=true (P kept in registers for PV matmul, not smem round-trip)
+
+Our kernel doc claims wider CN regressed (hd256 CN=80@STAGES=2 → 0.59, hd192 CN=96 → 0.76) but FA3 wins with wide CN because of MmaPV_is_RS + IntraWGOverlap freeing smem from the P tile.
+
+**Progress (2026-06-24, ultracode session):**
+- Mask fast-out (skip per-element causal/window mask on fully-visible tiles, pf_mask + pf_mask_win): fixed large4k (→0.93), hd192 (→0.93), prefill3577 (→0.93), fp8_decode (→0.90), softcap (→0.97). The mask was stealing tensor-pipe issue slots between QK and next-QK.
+- **fp8 dense SOLVED via TMA loads (0.84→1.00x):** the fp8 persist producer was cp.async-gather-bound (long_scoreboard 2.4). Switched K + V-staging to TMA (cp.async.bulk.tensor, UINT8 dtype, 128B swizzle = koff8). New make_fp8_contig map builder; producer pt==0 issues 2 tma_box per tile (loaded[] count→1, expect_tx). Q stays cp.async. fp8 128B swizzle for a 128-wide box lands exactly koff8 (Swizzle<3,4,3>). See kernels/fa3_fwd.cu prefill_fp8_persist_kernel.
+- FAILED fp8 attempts (don't retry): register-P RS-PV (validated correct in fp8_probe via permute_Aregs shuffle, but REGRESSED 0.85→0.83 — fp8 is producer/load-bound, not consumer-bound); deeper cp.async prefetch + STAGES=4 (0.74, worse).
+- FAILED hd256 attempts: CN=64/ST=2 (0.63), CN=80/ST=2 (0.58, FA3's config but our pipeline starves at ST=2), CM=64/CN=64/ST=3 (0.53, loses M-parallelism), inter-WG ping-pong (0.86 neutral). CN=48/ST=3/CM=128 (0.84-0.86) is the smem-constrained local optimum. hd256 remaining gap = narrow-n48-wgmma inefficiency (FA3 uses n80) + load latency; needs K/V-ring-split or pipeline rewrite. hd256 is smem-HARD-capped: CN*STAGES<=163 at CM=128 (Q=64KB), and CN=56 doesn't fit, ST=2 starves.
+- **fp8_decode SOLVED via paged TMA (0.88→0.95):** same fix as dense — the per-tile prefill_fp8_kernel was long_scoreboard-bound (2.87) on the paged cp.async gather. Added a `USE_TMA` template + make_fp8_paged map (per-page [128,block_size] boxes, page-table-indexed); host builds maps + cp.async fallback when block_size doesn't compose with the swizzle.
+
+**FINAL STATUS (2026-06-24, ultracode session — user accepted "39/40, finalize"):** authoritative full-suite run = 40/40 correct, geomean **1.105x**, median 1.102x, min 0.847x, 35/40 >=0.95, **39/40 >=0.90**. The ONLY scenario below 0.90 is fa3_dense_hd256_causal (0.847x), accepted by the user as the documented architectural limit of the hand-written design. All 5 other originally-listed goal scenarios cleared: large4k 0.930, fp8 1.009, fp8_decode 0.948, prefill3577 0.928, hd192 0.933 (+ softcap 0.972). README perf table + bench/plot.py snapshot + docs/per_scenario_speedup.png all regenerated to these numbers.
+
+hd256 closeout: 8 in-session approaches exhausted (all neutral/regress). Confirmed-worse last test = routing hd256 through the per-tile (non-persist) prefill_kernel via `HD != 256` gate → 0.739x (persist 0.847 is better; reverted). The remaining gap is FA3's CUTLASS PipelineTmaAsync collective efficiency (fits CN=80/ST=2 at ~62% tensor; our hand-written ST=2 ring bubbles on the mbarrier handshake). Closing it = multi-week full CollectiveMainloopFwdSm90 port that contradicts the no-CUTLASS design — explicitly OUT OF SCOPE per user decision.
+
+hd256 attempts (all reverted, kernel is clean): CN=64/80 at ST=2 (0.58-0.64, starve), CM=64/CN=64/ST=3 (0.53), inter-WG ping-pong (0.86, neutral), K/V ring split (0.844, neutral at ST=3), IntraWGOverlap double-P (0.81, regress — pack extends the wait window past PV), CN=80/ST=2 + TMA L2 prefetch-ahead (0.578 — DECISIVE: prefetch did nothing, so the ST=2 starvation is NOT load-latency; it's the 2-stage ring having no slack for the handshake latency). hd256 is HARD-capped: CN*STAGES<=163 at CM=128 (Q=64KB of 227KB cap) -> CN=48/ST=3 (0.845) is the max wide-tile-at-deep-pipe; CN=40 isn't wgmma-supported, CN>=56 doesn't fit, ST=2 starves structurally. The gap to FA3 = narrow-n48 wgmma efficiency (FA3 runs n80 at ST=2 via its CUTLASS PipelineTmaAsync collective).
+
+**DECISIVE (K/V split-ring experiment, 2026-06-24, user-greenlit "decoupling fix"):** Implemented separate K and V smem rings with decoupled freeing in prefill_persist_kernel (gated `bool KVSPLIT` template, K freed after QK/wgmma_wait1, V after PV/wgmma_wait0; FA3's exact scheme — confirmed via reference/vllm-flash-attention: FA3 sm90 uses kStages=2 + MmaPV_is_RS + IntraWGOverlap, and OUR bf16 consumer ALREADY has RS-PV + IntraWGOverlap via qk_rs_pv_g). The split-ring is CORRECT (no deadlock, all configs pass) and fixes the pipeline starvation, BUT the binding constraint for hd256 at CN>48 is **REGISTER PRESSURE, not pipeline**: HDV=256 forces acc_o[128]; CN>48 then overflows the 232-reg consumer -> ptxas **C7512 wgmma serialization**, which makes wider tiles SLOWER (split CN=80 -> 0.659, CN=64 -> 0.756). At the register-safe CN=48, the split-ring REGRESSED vs coupled (0.823 vs 0.847: CN=48 is not pipeline-bound, the decoupled V-wait/free just adds barrier cost). So coupled CN=48/ST=3 (0.847-0.851) is the local optimum. **The true hd256 gap to FA3 = FA3's tighter (CUTLASS) register allocation lets it run n80 without C7512; matching it = deep consumer register surgery (e.g. de-overlap QK/PV to cut peak live set), orthogonal to the pipeline, uncertain payoff, risks the 39 working scenarios.** The KVSPLIT split-ring code was REMOVED in cleanup (negative result); the kernel is back to the coupled CN=48/ST=3 baseline. Also removed in the same cleanup: dead pre-existing hd128 helper variants (qk_batch/pv_batch/qk_gemm_sw/pv_gemm_t_sw + the _cute cluster qk_batch_cute/pv_batch_cute/qk_rs_pv_cute + rescale_o, all superseded by the _g generics; plus orphaned qk_doff/SW_V_LBO). Verified 40/40 correct, geomean ~1.10, no regression. Closing hd256 = either consumer register surgery (de-overlap QK/PV + ping-pong to fit CN>=64 under 232 regs) or porting CollectiveMainloopFwdSm90.
+
+
+
+Key files: kernels/fa3_fwd.cu — per-tile prefill_kernel ~L882, persist prefill_persist_kernel ~L1206, fp8 persist ~L1700, combine_kernel ~L2371, dispatch tile selection L2112-2127. See [[fa3-page128-nan-fix]].

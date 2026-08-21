@@ -1,0 +1,278 @@
+// Validate the fp8 (e4m3) wgmma path piece by piece before touching fa3_hopper.cu:
+//   PART 1 (QK): gather Q,K (fp8, K-major) into the 1-byte 128B-swizzle smem tile, run
+//                wgmma.m64n128k32.f32.e4m3.e4m3 (SS), reconstruct S[q][key] and compare to a CPU
+//                fp8 QK reference. Validates koff8 swizzle + descriptor (LBO/SBO/lt) + k32 stepping.
+//   PART 2 (PV): given P[q][key] (fp8) and V[key][dv] (fp8), transpose V to K-major smem [dv,key],
+//                build the P RS A-fragment (ALayout_64x32 + permute), run wgmma.m64n64k32 (RS), and
+//                compare O[q][dv] to a CPU reference. Validates V-transpose + P fp8 packing/permute.
+//   nvcc -O3 -std=c++17 -gencode arch=compute_90a,code=sm_90a fp8_probe.cu -o /tmp/fp8_probe && /tmp/fp8_probe
+#include "probe_common.cuh"
+#include <cuda_fp8.h>
+#include <cstdio>
+#include <cmath>
+#include <vector>
+
+using fp8 = __nv_fp8_e4m3;
+constexpr int HD = 128, HDV = 128, CTA_M = 128, CTA_N = 128, WG = 128;
+
+// ---- fp8 K-major 128B swizzle (1-byte): 128 fp8 = 128B row, 16-byte (16-fp8) chunk swizzled by row&7.
+__device__ __forceinline__ int koff8(int row, int c) { return (c >> 7) * (128 * CTA_N) + row * 128 + ((c & 127) ^ ((row & 7) << 4)); }
+__device__ __forceinline__ uint64_t make_smem_desc(uint32_t a, uint32_t lbo, uint32_t sbo, uint32_t lt) {
+    uint64_t d = 0; d |= (uint64_t)((a >> 4) & 0x3FFFu); d |= (uint64_t)((lbo >> 4) & 0x3FFFu) << 16;
+    d |= (uint64_t)((sbo >> 4) & 0x3FFFu) << 32; d |= (uint64_t)(lt & 0x3u) << 62; return d;
+}
+constexpr uint32_t SW_LBO = 16, SW_SBO = 1024;   // bytes; same as bf16 (physical 128B rows / 8-row atoms)
+
+#define ACC64 "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31,%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,%44,%45,%46,%47,%48,%49,%50,%51,%52,%53,%54,%55,%56,%57,%58,%59,%60,%61,%62,%63}"
+#define OUT64(a) \
+  "+f"(a[0]),"+f"(a[1]),"+f"(a[2]),"+f"(a[3]),"+f"(a[4]),"+f"(a[5]),"+f"(a[6]),"+f"(a[7]),"+f"(a[8]),"+f"(a[9]),"+f"(a[10]),"+f"(a[11]),"+f"(a[12]),"+f"(a[13]),"+f"(a[14]),"+f"(a[15]),"+f"(a[16]),"+f"(a[17]),"+f"(a[18]),"+f"(a[19]),"+f"(a[20]),"+f"(a[21]),"+f"(a[22]),"+f"(a[23]),"+f"(a[24]),"+f"(a[25]),"+f"(a[26]),"+f"(a[27]),"+f"(a[28]),"+f"(a[29]),"+f"(a[30]),"+f"(a[31]),"+f"(a[32]),"+f"(a[33]),"+f"(a[34]),"+f"(a[35]),"+f"(a[36]),"+f"(a[37]),"+f"(a[38]),"+f"(a[39]),"+f"(a[40]),"+f"(a[41]),"+f"(a[42]),"+f"(a[43]),"+f"(a[44]),"+f"(a[45]),"+f"(a[46]),"+f"(a[47]),"+f"(a[48]),"+f"(a[49]),"+f"(a[50]),"+f"(a[51]),"+f"(a[52]),"+f"(a[53]),"+f"(a[54]),"+f"(a[55]),"+f"(a[56]),"+f"(a[57]),"+f"(a[58]),"+f"(a[59]),"+f"(a[60]),"+f"(a[61]),"+f"(a[62]),"+f"(a[63])
+
+extern __shared__ __align__(1024) char smem_raw[];
+
+// Gather one fp8 row (HD elems) into the swizzled K-major smem tile (16-fp8 = 16B chunks).
+__device__ __forceinline__ void gather8(fp8* sbase, int row, const fp8* src) {
+#pragma unroll
+    for (int c16 = 0; c16 < HD / 16; ++c16)
+        *reinterpret_cast<uint4*>(sbase + koff8(row, c16 * 16)) = *reinterpret_cast<const uint4*>(src + c16 * 16);
+}
+
+// PART 1: QK only. 256 threads; 0..127 load Q,K rows; both warpgroups run the QK wgmma.
+__global__ void qk_only_fp8(const fp8* Q, const fp8* K, float* Sout) {
+    fp8* sQ = reinterpret_cast<fp8*>(smem_raw);
+    fp8* sK = sQ + CTA_M * HD;
+    int tid = threadIdx.x;
+    if (tid < 128) { gather8(sQ, tid, Q + tid * HD); gather8(sK, tid, K + tid * HD); }
+    __syncthreads();
+    asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
+    int cwg = tid / WG, wtid = tid % WG, warp = wtid >> 5, lane = wtid & 31;
+    uint32_t sQ_wg = (uint32_t)__cvta_generic_to_shared(sQ) + (uint32_t)(cwg * 64 * 128);  // 64 rows * 128 B
+    uint32_t sK_a = (uint32_t)__cvta_generic_to_shared(sK);
+    float s[64];
+#pragma unroll
+    for (int i = 0; i < 64; ++i) s[i] = 0.f;
+    asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
+#pragma unroll
+    for (int kb = 0; kb < HD / 32; ++kb) {                  // 4 k32 blocks for hd128
+        uint32_t off = (uint32_t)(kb * 32);                 // k-block byte offset within the 128B row
+        uint64_t dA = make_smem_desc(sQ_wg + off, SW_LBO, SW_SBO, 1);
+        uint64_t dB = make_smem_desc(sK_a + off, SW_LBO, SW_SBO, 1);
+        int scaleD = (kb == 0) ? 0 : 1;
+        asm volatile("{\n.reg .pred p;\n setp.ne.b32 p, %66, 0;\n wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e4m3 " ACC64 ",%64,%65,p,%67,%68;\n}\n"
+                     : OUT64(s) : "l"(dA),"l"(dB),"r"(scaleD),"n"(1),"n"(1));
+    }
+    asm volatile("wgmma.commit_group.sync.aligned;\nwgmma.wait_group.sync.aligned 0;\n" ::: "memory");
+    int group = lane >> 2, tg = lane & 3;
+#pragma unroll
+    for (int c = 0; c < 16; ++c)
+        for (int r = 0; r < 2; ++r)
+            for (int p = 0; p < 2; ++p) {
+                int row = cwg * 64 + warp * 16 + group + r * 8;
+                int col = 8 * c + tg * 2 + p;
+                Sout[row * CTA_N + col] = s[c * 4 + r * 2 + p];
+            }
+}
+
+// PART 2: PV with P in smem (SS), V transposed to K-major smem [dv,key]. m64n128k32 (n=hdv=128).
+//   A = P[q][key]  K-major (key contiguous), swizzle koff8(q, key)
+//   B = V[dv][key] K-major (key contiguous), swizzle koff8(dv, key)  -- V transposed from gmem [key][dv]
+__global__ void pv_only_fp8(const float* P, const fp8* V, float* Oout) {
+    fp8* sP = reinterpret_cast<fp8*>(smem_raw);          // [CTA_M=128 q, CTA_N=128 key]
+    fp8* sV = sP + CTA_M * CTA_N;                         // [HDV=128 dv, CTA_N=128 key]
+    int tid = threadIdx.x;
+    // load P[q][key] -> sP swizzled (q rows, key cols). 256 threads: thread loads 64 q-rows? simpler: each of 128 threads loads one q-row of 128 keys.
+    if (tid < CTA_M) {
+        const float* prow = P + tid * CTA_N;
+        fp8 tmp[16];
+#pragma unroll
+        for (int c16 = 0; c16 < CTA_N / 16; ++c16) {
+#pragma unroll
+            for (int e = 0; e < 16; ++e) tmp[e] = fp8(prow[c16 * 16 + e]);
+            *reinterpret_cast<uint4*>(sP + koff8(tid, c16 * 16)) = *reinterpret_cast<const uint4*>(tmp);
+        }
+    }
+    // transpose V[key][dv] (gmem) -> sV[dv][key] (smem K-major). thread = key (0..127) scatters its dv's.
+    if (tid < CTA_N) {
+        const fp8* vrow = V + tid * HDV;                 // V[key=tid][0..HDV)
+#pragma unroll
+        for (int dv = 0; dv < HDV; ++dv) sV[koff8(dv, tid)] = vrow[dv];   // sV[dv][key=tid]
+    }
+    __syncthreads();
+    asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
+    int cwg = tid / WG, wtid = tid % WG, warp = wtid >> 5, lane = wtid & 31;
+    uint32_t sP_wg = (uint32_t)__cvta_generic_to_shared(sP) + (uint32_t)(cwg * 64 * 128);
+    uint32_t sV_a = (uint32_t)__cvta_generic_to_shared(sV);
+    float o[64];
+#pragma unroll
+    for (int i = 0; i < 64; ++i) o[i] = 0.f;
+    asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
+#pragma unroll
+    for (int kb = 0; kb < CTA_N / 32; ++kb) {            // 4 k32 blocks over key
+        uint32_t off = (uint32_t)(kb * 32);
+        uint64_t dA = make_smem_desc(sP_wg + off, SW_LBO, SW_SBO, 1);
+        uint64_t dB = make_smem_desc(sV_a + off, SW_LBO, SW_SBO, 1);
+        int scaleD = (kb == 0) ? 0 : 1;
+        asm volatile("{\n.reg .pred p;\n setp.ne.b32 p, %66, 0;\n wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e4m3 " ACC64 ",%64,%65,p,%67,%68;\n}\n"
+                     : OUT64(o) : "l"(dA),"l"(dB),"r"(scaleD),"n"(1),"n"(1));
+    }
+    asm volatile("wgmma.commit_group.sync.aligned;\nwgmma.wait_group.sync.aligned 0;\n" ::: "memory");
+    int group = lane >> 2, tg = lane & 3;
+#pragma unroll
+    for (int c = 0; c < 16; ++c)
+        for (int r = 0; r < 2; ++r)
+            for (int p = 0; p < 2; ++p) {
+                int row = cwg * 64 + warp * 16 + group + r * 8;   // q
+                int col = 8 * c + tg * 2 + p;                     // dv
+                Oout[row * HDV + col] = o[c * 4 + r * 2 + p];
+            }
+}
+
+// PART 3: PV with P in REGISTERS (RS A-operand) -- the FA3 fp8 path (MmaPV_is_RS). Each thread loads
+// its 64 C-accumulator P values (the QK-output layout), applies permute_Cregs_fp8 (intra-thread f32
+// swaps, NO shuffle) + 4:1 e4m3 pack, and feeds the 16 u32 as the wgmma A operand (4 regs / k-block).
+// Validates the C->A transform so it can replace the smem-P scatter+barrier round-trip in fa3_hopper.cu.
+__device__ __forceinline__ uint32_t pack4_e4m3(float a, float b, float c, float d) {
+    __nv_fp8x2_e4m3 lo, hi;
+    lo.__x = (__nv_fp8_storage_t)0; hi.__x = (__nv_fp8_storage_t)0;
+    // build via two e4m3x2 packs (cvt.rn.satfinite.e4m3x2.f32 emits the same as the intrinsic).
+    __nv_fp8_e4m3 e0(a), e1(b), e2(c), e3(d);
+    return (uint32_t)e0.__x | ((uint32_t)e1.__x << 8) | ((uint32_t)e2.__x << 16) | ((uint32_t)e3.__x << 24);
+}
+__global__ void pv_rs_fp8(const float* P, const fp8* V, float* Oout) {
+    fp8* sV = reinterpret_cast<fp8*>(smem_raw);          // [HDV=128 dv, CTA_N=128 key]
+    int tid = threadIdx.x;
+    if (tid < CTA_N) {                                   // transpose V[key][dv] -> sV[dv][key] (K-major)
+        const fp8* vrow = V + tid * HDV;
+#pragma unroll
+        for (int dv = 0; dv < HDV; ++dv) sV[koff8(dv, tid)] = vrow[dv];
+    }
+    __syncthreads();
+    asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
+    int cwg = tid / WG, wtid = tid % WG, warp = wtid >> 5, lane = wtid & 31;
+    int group = lane >> 2, tg = lane & 3;
+    uint32_t sV_a = (uint32_t)__cvta_generic_to_shared(sV);
+    // (a) load this thread's 64 P values in the canonical C-accumulator layout s[c*4+r2*2+p], pack
+    //     each c-group's 4 f32 -> 1 u32 (combine (p,r2) into the inner 4, the convert_layout_acc_Aregs
+    //     order), giving P16[c] (c=0..15). Then permute_Aregs_fp8 (quad __shfl + byte_perm) fixes the
+    //     register layout to the wgmma A operand (FA3 utils.h:523).
+    uint32_t P16[16];
+#pragma unroll
+    for (int c = 0; c < 16; ++c) {
+        float v[4];
+#pragma unroll
+        for (int r2 = 0; r2 < 2; ++r2)
+            for (int p = 0; p < 2; ++p) {
+                int row = cwg * 64 + warp * 16 + group + 8 * r2;
+                int key = 8 * c + 2 * tg + p;
+                v[r2 * 2 + p] = P[row * CTA_N + key];
+            }
+        P16[c] = pack4_e4m3(v[0], v[1], v[2], v[3]);
+    }
+    // permute_Aregs_fp8: per k-block, the 4 u32 form 2 uint2 (P16[4kb+0,1] and P16[4kb+2,3]); shuffle
+    // upper/lower across the 4-lane quad + byte_perm to gather the keys this thread's A operand needs.
+    {
+        int quad = tg;
+        bool lane_03 = (quad == 0 || quad == 3);
+        int sel_up = lane_03 ? 0x5410 : 0x1054;
+        int sel_lo = lane_03 ? 0x7632 : 0x3276;
+        const int upper_map[4] = {0, 3, 1, 2};
+#pragma unroll
+        for (int u = 0; u < 8; ++u) {           // 8 uint2 (2 per k-block x 4 k-blocks)
+            uint32_t upper = P16[2*u + 0], lower = P16[2*u + 1];
+            uint32_t upper0 = lane_03 ? upper : lower;
+            uint32_t lower0 = lane_03 ? lower : upper;
+            upper0 = __shfl_sync(0xffffffffu, upper0, (warp*32 + group*4) + upper_map[quad], 32);
+            lower0 = __shfl_sync(0xffffffffu, lower0, (warp*32 + group*4) + (upper_map[quad] ^ 1), 32);
+            P16[2*u + 0] = __byte_perm(upper0, lower0, sel_up);
+            P16[2*u + 1] = __byte_perm(upper0, lower0, sel_lo);
+        }
+    }
+    float o[64];
+#pragma unroll
+    for (int i = 0; i < 64; ++i) o[i] = 0.f;
+    asm volatile("" : "+r"(P16[0]) :: "memory");
+    asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
+#pragma unroll
+    for (int kb = 0; kb < CTA_N / 32; ++kb) {            // 4 k32 blocks; A = 4 regs P16[kb*4..kb*4+3]
+        uint32_t off = (uint32_t)(kb * 32);
+        uint64_t dB = make_smem_desc(sV_a + off, SW_LBO, SW_SBO, 1);
+        int scaleD = (kb == 0) ? 0 : 1;
+        asm volatile("{\n.reg .pred p;\n setp.ne.b32 p, %68, 0;\n"
+                     "wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e4m3 " ACC64 ",{%64,%65,%66,%67},%69,p,%70,%71;\n}\n"
+                     : OUT64(o)
+                     : "r"(P16[kb*4+0]),"r"(P16[kb*4+1]),"r"(P16[kb*4+2]),"r"(P16[kb*4+3]),
+                       "r"(scaleD),"l"(dB),"n"(1),"n"(1));
+    }
+    asm volatile("wgmma.commit_group.sync.aligned;\nwgmma.wait_group.sync.aligned 0;\n" ::: "memory");
+    // (direct ALayout build: no output permute needed)
+#pragma unroll
+    for (int c = 0; c < 16; ++c)
+        for (int r = 0; r < 2; ++r)
+            for (int p = 0; p < 2; ++p) {
+                int row = cwg * 64 + warp * 16 + group + r * 8;
+                int col = 8 * c + tg * 2 + p;
+                Oout[row * HDV + col] = o[c * 4 + r * 2 + p];
+            }
+}
+
+void run_pv() {
+    const int M = 128;
+    std::vector<float> hP(M * CTA_N);
+    std::vector<fp8> hV(CTA_N * HDV);
+    { uint64_t s = 7 * 6364136223846793005ULL + 1442695040888963407ULL;
+      for (auto& x : hP) { s = s * 6364136223846793005ULL + 1442695040888963407ULL;
+          x = ((float)(uint32_t)(s >> 32) / 4294967296.0f); } }            // P in [0,1)
+    { uint64_t s = 9 * 6364136223846793005ULL + 1442695040888963407ULL;
+      for (auto& x : hV) { s = s * 6364136223846793005ULL + 1442695040888963407ULL;
+          x = fp8(((float)(uint32_t)(s >> 32) / 4294967296.0f) * 2.0f - 1.0f); } }
+    std::vector<float> Oref(M * HDV);
+    for (int i = 0; i < M; ++i) for (int j = 0; j < HDV; ++j) {
+        float a = 0; for (int k = 0; k < CTA_N; ++k) a += float(fp8(hP[i*CTA_N+k])) * float(hV[k*HDV+j]); Oref[i*HDV+j] = a; }
+    float *dP, *dO; fp8* dV;
+    ORC_CHECK(cudaMalloc(&dP, sizeof(float)*M*CTA_N)); ORC_CHECK(cudaMalloc(&dV, sizeof(fp8)*CTA_N*HDV)); ORC_CHECK(cudaMalloc(&dO, sizeof(float)*M*HDV));
+    ORC_CHECK(cudaMemcpy(dP, hP.data(), sizeof(float)*M*CTA_N, cudaMemcpyHostToDevice));
+    ORC_CHECK(cudaMemcpy(dV, hV.data(), sizeof(fp8)*CTA_N*HDV, cudaMemcpyHostToDevice));
+    int smem = (CTA_M * CTA_N + HDV * CTA_N) * (int)sizeof(fp8);
+    ORC_CHECK(cudaFuncSetAttribute(pv_only_fp8, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+    pv_only_fp8<<<1, 256, smem>>>(dP, dV, dO); ORC_CHECK(cudaDeviceSynchronize());
+    std::vector<float> hO(M*HDV); ORC_CHECK(cudaMemcpy(hO.data(), dO, sizeof(float)*M*HDV, cudaMemcpyDeviceToHost));
+    double md = 0; int bi=-1,bj=-1; for (int i=0;i<M;++i) for (int j=0;j<HDV;++j){ double d=std::fabs(hO[i*HDV+j]-Oref[i*HDV+j]); if(d>md){md=d;bi=i;bj=j;} }
+    printf("[PV fp8] max_abs_diff=%.4f at (%d,%d) gpu=%.4f ref=%.4f  %s\n", md, bi, bj, hO[bi*HDV+bj], Oref[bi*HDV+bj], md < 0.5 ? "PASS" : "FAIL");
+    for (int i=0;i<2;++i) for(int j=0;j<3;++j) printf("   O[%d][%d] gpu=%.3f ref=%.3f\n", i,j, hO[i*HDV+j], Oref[i*HDV+j]);
+
+    // RS variant: P in registers (the FA3 MmaPV_is_RS path) -- must match Oref like the SS path above.
+    int smem_rs = HDV * CTA_N * (int)sizeof(fp8);
+    ORC_CHECK(cudaFuncSetAttribute(pv_rs_fp8, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_rs));
+    pv_rs_fp8<<<1, 256, smem_rs>>>(dP, dV, dO); ORC_CHECK(cudaDeviceSynchronize());
+    std::vector<float> hOr(M*HDV); ORC_CHECK(cudaMemcpy(hOr.data(), dO, sizeof(float)*M*HDV, cudaMemcpyDeviceToHost));
+    double mr = 0; int ri=-1,rj=-1; for (int i=0;i<M;++i) for (int j=0;j<HDV;++j){ double d=std::fabs(hOr[i*HDV+j]-Oref[i*HDV+j]); if(d>mr){mr=d;ri=i;rj=j;} }
+    printf("[PV-RS fp8] max_abs_diff=%.4f at (%d,%d) gpu=%.4f ref=%.4f  %s\n", mr, ri, rj, hOr[ri*HDV+rj], Oref[ri*HDV+rj], mr < 0.5 ? "PASS" : "FAIL");
+    for (int i=0;i<2;++i) for(int j=0;j<3;++j) printf("   Ors[%d][%d] gpu=%.3f ref=%.3f\n", i,j, hOr[i*HDV+j], Oref[i*HDV+j]);
+}
+
+int main() {
+    const int M = 128, N = 128;
+    // fp8 inputs (small magnitudes so e4m3 represents them with low error).
+    std::vector<fp8> hQ(M * HD), hK(N * HD);
+    auto fillf = [](std::vector<fp8>& o, uint64_t seed) {
+        uint64_t s = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+        for (auto& x : o) { s = s * 6364136223846793005ULL + 1442695040888963407ULL;
+            float v = ((float)(uint32_t)(s >> 32) / 4294967296.0f) * 2.0f - 1.0f; x = fp8(v); }
+    };
+    fillf(hQ, 11); fillf(hK, 22);
+    std::vector<float> Sref(M * N);
+    for (int i = 0; i < M; ++i) for (int j = 0; j < N; ++j) {
+        float a = 0; for (int d = 0; d < HD; ++d) a += float(hQ[i*HD+d]) * float(hK[j*HD+d]); Sref[i*N+j] = a; }
+    fp8 *dQ, *dK; float* dS;
+    ORC_CHECK(cudaMalloc(&dQ, sizeof(fp8)*M*HD)); ORC_CHECK(cudaMalloc(&dK, sizeof(fp8)*N*HD)); ORC_CHECK(cudaMalloc(&dS, sizeof(float)*M*N));
+    ORC_CHECK(cudaMemcpy(dQ, hQ.data(), sizeof(fp8)*M*HD, cudaMemcpyHostToDevice));
+    ORC_CHECK(cudaMemcpy(dK, hK.data(), sizeof(fp8)*N*HD, cudaMemcpyHostToDevice));
+    int smem = (CTA_M + CTA_N) * HD * (int)sizeof(fp8);
+    ORC_CHECK(cudaFuncSetAttribute(qk_only_fp8, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+    qk_only_fp8<<<1, 256, smem>>>(dQ, dK, dS); ORC_CHECK(cudaDeviceSynchronize());
+    std::vector<float> hS(M*N); ORC_CHECK(cudaMemcpy(hS.data(), dS, sizeof(float)*M*N, cudaMemcpyDeviceToHost));
+    double md = 0; int bi=-1,bj=-1; for (int i=0;i<M;++i) for (int j=0;j<N;++j){ double d=std::fabs(hS[i*N+j]-Sref[i*N+j]); if(d>md){md=d;bi=i;bj=j;} }
+    printf("[QK fp8] max_abs_diff=%.4f at (%d,%d) gpu=%.4f ref=%.4f  %s\n", md, bi, bj, hS[bi*N+bj], Sref[bi*N+bj], md < 0.5 ? "PASS" : "FAIL");
+    for (int i=0;i<2;++i) for(int j=0;j<3;++j) printf("   S[%d][%d] gpu=%.3f ref=%.3f\n", i,j, hS[i*N+j], Sref[i*N+j]);
+    run_pv();
+    return 0;
+}

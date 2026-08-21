@@ -1,0 +1,25 @@
+# Compiled kernel binaries (everything in kernels/ except sources)
+kernels/*
+!kernels/*.cu
+!kernels/*.cuh
+
+# In-loop trial build scratch (throwaway .so + objects)
+.fa3_trials/
+
+
+# PTX / SASS dumps, profiler reports
+*.ptx
+*.sass
+*.ncu-rep
+*.nsys-rep
+*.cubin
+*.o
+
+# Large reference tensors
+*.bin
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

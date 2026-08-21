@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""inspect_ptx.py — extract the ordered sequence of tensor-core / async primitives a kernel issues,
+so a hand-written kernel can mirror them. Portable helper for the distill-kernel skill.
+
+The ordered, de-duplicated instruction sequence this prints IS the spec for the hand-written kernel.
+Counts + the HGMMA:DEPBAR ratio tell you whether wgmma groups are async (low ratio) or serialized.
+
+Modes:
+  inspect_ptx.py build  <file.cu> [nvcc args...]   # compile to PTX (adds compute_90a) then extract
+  inspect_ptx.py ptx    <file.ptx>                 # extract from existing PTX
+  inspect_ptx.py sass   <file.so|.cubin|.o|bin>    # cuobjdump -sass then extract (SASS mnemonics)
+  inspect_ptx.py symbols<file.so>                  # list device kernel symbols (demangled)
+  inspect_ptx.py sass   <file.so> --fun <mangled>  # disassemble ONE kernel by symbol
+
+Notes:
+  * wgmma needs `-gencode arch=compute_90a,code=sm_90a`; this script adds it for `build`.
+  * For a big .so with many instantiations, use `symbols` to find the kernel, then `sass --fun`.
+"""
+import re, subprocess, sys, shutil, tempfile, os
+
+# Longest-match-first: (label, regex). PTX forms and their SASS mnemonics.
+PATTERNS = [
+    ("wgmma.mma_async",        r"wgmma\.mma_async\.sync\.aligned\.m\d+n\d+k\d+\.[a-z0-9.]+"),
+    ("wgmma.fence",            r"wgmma\.fence\.sync\.aligned"),
+    ("wgmma.commit_group",     r"wgmma\.commit_group\.sync\.aligned"),
+    ("wgmma.wait_group",       r"wgmma\.wait_group\.sync\.aligned\s+\d+"),
+    ("tcgen05.mma",            r"tcgen05\.mma[a-z0-9.]*"),          # Blackwell
+    ("tcgen05.ld/st",          r"tcgen05\.(ld|st|cp|alloc|dealloc)[a-z0-9.]*"),
+    ("cp.async.bulk.tensor",   r"cp\.async\.bulk\.tensor\.\d+d[a-z0-9.:]*"),
+    ("cp.async.bulk.prefetch", r"cp\.async\.bulk\.prefetch\.tensor[a-z0-9.:]*"),
+    ("cp.async (cg/ca)",       r"cp\.async\.(cg|ca)\.shared[a-z0-9.:]*"),
+    ("mbarrier",               r"mbarrier\.[a-z0-9._:]+"),
+    ("fence.proxy.async",      r"fence\.proxy\.async[a-z0-9.:]*"),
+    ("setmaxnreg",             r"setmaxnreg\.(inc|dec)\.sync\.aligned\.u32"),
+    ("ldmatrix",               r"ldmatrix\.sync\.aligned[a-z0-9.]*"),
+    ("stmatrix",               r"stmatrix\.sync\.aligned[a-z0-9.]*"),
+    ("ex2.approx",             r"ex2\.approx[a-z0-9.]*"),
+    ("tensormap",              r"(prefetch\.tensormap|tensormap\.[a-z0-9.]+)"),
+    ("griddepcontrol",         r"griddepcontrol\.[a-z]+"),
+    ("barrier/bar.sync",       r"(barrier\.(sync|arrive)[a-z0-9.]*|bar\.(sync|arrive)[a-z0-9.]*)"),
+    # SASS-only mnemonics (so `sass` mode still finds tensor ops even though PTX regexes miss):
+    ("SASS HGMMA",             r"\bHGMMA[A-Z0-9.]*"),
+    ("SASS UTCMMA/OGMMA",      r"\b(UTCMMA|OGMMA|QGMMA)[A-Z0-9.]*"),   # Blackwell tcgen05 mnemonics vary
+    ("SASS WARPGROUP.DEPBAR",  r"\bWARPGROUP\.DEPBAR[A-Z0-9.]*"),
+    ("SASS UTMALDG (TMA)",     r"\bUTMALDG[A-Z0-9.]*"),
+    ("SASS LDSM/STSM",         r"\b(LDSM|STSM)[A-Z0-9.]*"),
+]
+
+def extract(text: str):
+    counts, tokens, seq = {}, {}, []
+    for line in text.splitlines():
+        for label, rx in PATTERNS:
+            for m in re.finditer(rx, line):
+                counts[label] = counts.get(label, 0) + 1
+                tok = m.group(0)
+                tokens[tok] = tokens.get(tok, 0) + 1
+                if not seq or seq[-1] != label:
+                    seq.append(label)
+    return counts, tokens, seq
+
+def run(cmd):
+    return subprocess.run(cmd, capture_output=True, text=True).stdout
+
+def main():
+    if len(sys.argv) < 3:
+        print(__doc__); return 1
+    mode, path = sys.argv[1], sys.argv[2]
+    rest = sys.argv[3:]
+
+    if mode == "symbols":
+        out = run(["cuobjdump", "-symbols", path])
+        syms = [l.split()[-1] for l in out.splitlines() if "STT_FUNC" in l]
+        dem = run(["c++filt"] + [])  # demangle via stdin
+        p = subprocess.run(["c++filt"], input="\n".join(syms), capture_output=True, text=True)
+        for raw, d in zip(syms, p.stdout.splitlines()):
+            if "device_kernel" in d or "Fwd" in d or "kernel" in d.lower():
+                print(f"{raw}\n    {d}\n")
+        return 0
+
+    if mode == "build":
+        with tempfile.NamedTemporaryFile(suffix=".ptx", delete=False) as f:
+            ptx = f.name
+        cmd = ["nvcc", "-ptx", "-O3", "-std=c++17",
+               "-gencode", "arch=compute_90a,code=sm_90a",
+               "--expt-relaxed-constexpr", "--expt-extended-lambda",
+               path, "-o", ptx] + rest
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.stderr.write(r.stderr); return r.returncode
+        text = open(ptx).read()
+    elif mode == "ptx":
+        text = open(path).read()
+    elif mode == "sass":
+        cmd = ["cuobjdump", "-sass"]
+        if "--fun" in rest:
+            i = rest.index("--fun"); cmd += ["-fun", rest[i+1]]
+        cmd.append(path)
+        text = run(cmd)
+    else:
+        print(__doc__); return 1
+
+    counts, tokens, seq = extract(text)
+    print("=== counts (by form) ===")
+    for k in sorted(counts, key=lambda k: -counts[k]):
+        print(f"  {counts[k]:6d}  {k}")
+    print("\n=== distinct tokens (operand shapes preserved) ===")
+    for t in sorted(tokens, key=lambda t: -tokens[t])[:40]:
+        print(f"  {tokens[t]:6d}  {t}")
+    # async-ness heuristic: MMA count vs group-barrier count
+    mma = counts.get("wgmma.mma_async", 0) + counts.get("SASS HGMMA", 0)
+    dep = counts.get("SASS WARPGROUP.DEPBAR", 0) + counts.get("wgmma.wait_group", 0)
+    if mma and dep:
+        print(f"\n=== MMA:barrier ratio = {mma}:{dep} = {mma/max(dep,1):.1f}  "
+              f"({'ASYNC (good)' if mma/max(dep,1) >= 6 else 'SERIALIZED — investigate'}) ===")
+    print("\n=== ordered de-duplicated sequence (MIRROR THIS in the hand-written kernel) ===")
+    print("  " + " -> ".join(seq))
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())

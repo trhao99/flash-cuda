@@ -1,0 +1,322 @@
+"""Render the per-scenario bar charts for the README.
+
+Two charts, one per target arch:
+
+    cd /home/yak/fa3-cuda
+    python -m bench.plot                    # both charts
+    python -m bench.plot --arch hopper      # -> docs/per_scenario_speedup.png   (fa3_hopper.cu vs FA3)
+    python -m bench.plot --arch blackwell   # -> docs/blackwell_fa4_speedup.png  (fa4_blackwell.cu vs FA4)
+
+Hopper: horizontal bar per attntest scenario, speedup = FA3 time / our time (>1 = we beat FA3).
+Blackwell: same layout but speed = FA4 time / our time (>=1.0 = we match/beat the FA4 oracle).
+
+Both are SNAPSHOTS of the latest measured run. Regenerate the numbers with `python -m bench.eval`
+(Hopper, vs FA3) or `python -m bench.eval_fa4` (Blackwell, vs the FA4 oracle).
+"""
+from __future__ import annotations
+
+import argparse
+import math
+import os
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.patches import Patch  # noqa: E402
+
+_DOCS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs")
+
+# --------------------------------------------------------------------------------------
+# Hopper: fa3_hopper.cu vs FA3 (_vllm_fa3_C). speedup = FA3 time / our time (>1 = faster).
+# Snapshot (idle H200, GPU 0); reproduce with `python -m bench.eval` (attntest) +
+# `python -m bench.eval --set real` (SOL-ExecBench). All 74 numerically correct.
+# Two honest corners surfaced by the expanded coverage:
+#   * fp8 head_dim 256 (dense + decode) has no specialized path -> scalar fallback -> 0.20/0.34x.
+#     Kept in the chart as truthful coverage of an unoptimized corner, not hidden.
+#   * the SOL-ExecBench real GQA shapes (h32, page_size 1): a COALESCED cooperative K/V gather
+#     (TPR=HD/8 lanes/row + decoupled smem page-row prefetch, matching FA3's PagedKVManager) lifted
+#     the whole family (real geomean 0.65->0.75): short-ctx decode now BEATS FA3 (1.06-1.11x), and
+#     long-ctx decode + paged prefill went 0.53-0.73 -> 0.62-0.84x (now DRAM-latency-bound, not
+#     L1TEX-bound). Also nudged attntest page1/page4 (gather path) 1.14->1.20x. attntest geomean 1.06x.
+# --------------------------------------------------------------------------------------
+RESULTS = [
+    ("attn_dense_hd64_causal", 1.366),
+    ("attn_dense_hd96_causal", 0.982),
+    ("attn_dense_hd128_causal", 1.022),
+    ("attn_dense_hd192_causal", 0.940),
+    ("attn_dense_hd256_causal", 0.848),
+    ("attn_dense_hd128_noncausal", 1.059),
+    ("attn_dense_hd128_nc4k", 0.964),
+    ("attn_dense_hd128_gqa", 0.991),
+    ("attn_dense_hd128_mqa", 1.001),
+    ("attn_dense_hd128_fp16", 1.037),
+    ("attn_dense_hd128_fp8", 1.006),
+    ("attn_dense_hd128_softcap", 0.941),
+    ("attn_dense_hd128_local", 1.030),
+    ("attn_dense_hd128_oddseq", 1.207),
+    ("attn_dense_hd128_seq256", 1.090),
+    ("attn_dense_hd128_large4k", 0.931),
+    ("attn_dense_hd128_splits3", 1.181),
+    ("attn_varlen_hd128_causal", 1.311),
+    ("attn_varlen_hd128_noncausal", 1.287),
+    ("attn_varlen_hd64_causal", 1.513),
+    ("attn_varlen_hd128_mqa", 1.313),
+    ("attn_kv_hd128_decode_mha", 1.075),
+    ("attn_kv_hd128_decode_gqa5", 1.190),
+    ("attn_kv_hd128_decode_mqa32", 1.266),
+    ("attn_kv_hd128_decode_qlen120", 0.952),
+    ("attn_kv_hd128_decode_qlen8", 1.104),
+    ("attn_kv_hd64_decode_gqa3", 1.189),
+    ("attn_kv_hd256_decode_mqa16", 1.055),
+    ("attn_kv_hd128_decode_noncausal", 1.146),
+    ("attn_kv_hd128_fp8_decode", 0.953),
+    ("attn_kv_hd128_split2", 1.015),
+    ("attn_kv_hd256_split_auto", 1.117),
+    ("attn_kv_hd128_local_decode", 1.219),
+    ("attn_kv_hd128_decode_gqa9", 1.182),
+    ("attn_kv_hd128_decode_gqa7", 1.151),
+    ("attn_kv_hd128_decode_128k_splitkv", 1.012),
+    ("attn_kv_hd128_page1", 1.187),
+    ("attn_kv_hd128_page4", 1.202),
+    ("attn_kv_hd128_page128", 1.154),
+    ("attn_kv_hd128_ctx20k", 1.054),
+    ("attn_kv_hd128_prefill3577", 0.921),
+    ("attn_kv_hd128_dec339", 1.180),
+    ("attn_kv_hd128_dec1024", 1.280),
+    ("attn_kv_hd128_dec800", 1.123),
+    ("attn_dense_hd192_dv128", 0.923),
+    ("attn_varlen_hd192_dv128", 1.291),
+    ("attn_dense_hd64_fp16", 1.349),
+    ("attn_dense_hd192_fp16", 0.950),
+    ("attn_dense_hd128_fp8_gqa", 0.946),
+    ("attn_varlen_hd128_fp8", 1.458),
+    ("attn_kv_hd128_fp16_decode", 1.110),
+    ("attn_kv_hd64_fp8_decode", 0.969),
+    ("attn_dense_hd256_fp8", 0.196),
+    ("attn_kv_hd256_fp8_decode", 0.342),
+    ("attn_dense_hd128_kgtq", 1.117),
+    ("attn_dense_hd128_deg_q239k1", 1.065),
+    ("attn_dense_hd128_local_noncausal", 0.999),
+    ("attn_varlen_hd128_local", 1.274),
+    ("attn_dense_hd128_softcap_gqa", 0.948),
+    ("attn_dense_hd128_sink", 0.986),
+    ("attn_varlen_hd128_sink", 1.022),
+    ("attn_kv_hd128_leftpad", 1.227),
+    ("attn_dense_hd128_seq8k", 0.941),
+    ("attn_dense_hd128_seq16k", 0.953),
+    # --- real production shapes from nvidia/SOL-ExecBench (`python -m bench.eval --set real`) ---
+    # Llama-3.1-8B (h32/kv8/d128) + Qwen3-30B-A3B (h32/kv4/d128), page_size 1. (attn_real_llama8b_pf_ragged
+    # omitted: ws2 varlen hang, KNOWN_WS2_BUGS.)
+    ("attn_real_llama8b_dec_s512", 1.109),
+    ("attn_real_llama8b_dec_s4k", 0.758),
+    ("attn_real_llama8b_dec_s16k", 0.616),
+    ("attn_real_llama8b_dec_b64_s4k", 0.622),
+    ("attn_real_qwen3moe_dec_s512", 1.058),
+    ("attn_real_qwen3moe_dec_s4k", 0.840),
+    ("attn_real_qwen3moe_dec_s32k", 0.669),
+    ("attn_real_llama8b_pf_s2k", 0.641),
+    ("attn_real_llama8b_pf_s16k", 0.699),
+    ("attn_real_qwen3moe_pf_s4k", 0.639),
+]
+
+# --------------------------------------------------------------------------------------
+# Blackwell: fa4_blackwell.cu vs the vLLM FA4 oracle. speed = FA4 time / our time
+# (>=1.0 = we match/beat FA4). Snapshot (shared B200, GPU 0); reproduce with
+# `python -m bench.eval_fa4`. 48/59 runnable configs, all numerically correct vs FA4 +
+# fp32 ref; the other 10 (every fp8 path + head_dim>=192) are not built in this candidate.
+# The hd128 dense prefill envelope is auto-routed to the FA4-faithful fwd_kernel_fa4: dense
+# short-seqlen (causal/gqa/mqa/fp16/noncausal, q~1024) BEATS FA4 at 1.02-1.11x, reached by removing
+# ~38us/call of synchronous host launch overhead (cu_seqlens.to(cpu) + a per-call counter fill),
+# since the kernel is already faster than the CUTLASS kernel at matched clocks. A recon-guided
+# host/routing sweep then took the OVERALL geomean 0.879->1.151x (18->36 configs >=1.0x, 0
+# regressions, NO kernel bodies changed - every kernel register-identical): the same host-D2H fix
+# was propagated to the ws2 fall-through + paged/serial launchers, and a stale max_mq>=4 routing
+# gate was replaced by a grid-fill gate (routing hd64 + small-regular-dense to fwd_kernel_fa4;
+# sub-wave varlen stays on ws2). Then a Tier-1 kernel port grafted sliding-window + attention-sink
+# + hd96(PADQ) onto fwd_kernel_fa4 behind if-constexpr template bools (default instantiation SASS-
+# identical, envelope untouched) -> local 0.71->1.04, sink 0.74->1.02, local_noncausal 0.66->0.99,
+# hd96 0.73->0.84 (padded-128 compute-capped); OVERALL geomean -> 1.20x, 38/48 >=1.0x. On short
+# kernels the launcher wins are LAUNCHER-efficiency (partly FA4's own dispatch overhead), not kernel
+# speedups. softcap/splits >1.0 are FA4-oracle-slow paths. Residual sub-1.0 = paged prefills, gather
+# KV-feed-LATENCY-bound (prefill3577 0.56->0.665 via Tier-2 Lever-2: async cp.async Q-preload + resolve
+# page-row pointers once off the critical path, +28% geomean on the 3 large-q paged prefills; the
+# cp.async producer rewrite (Lever-1) LOST to HW tile::gather4 and is kept behind FA4_CPASYNC=1) plus
+# ctx20k 0.79/qlen120 0.69 (single-tile, ws_paged, unaffected), hd96 0.84 (native-96 kernel would beat
+# the padded path), and dense long-context nc4k/large4k/seq8k/seq16k (shared CuteDSL scheduling edge).
+# --------------------------------------------------------------------------------------
+BLACKWELL_RESULTS = [
+    ("attn_dense_hd64_causal", 1.286),
+    ("attn_dense_hd96_causal", 0.838),
+    ("attn_dense_hd128_causal", 1.093),
+    ("attn_dense_hd128_noncausal", 1.032),
+    ("attn_dense_hd128_nc4k", 0.897),
+    ("attn_dense_hd128_gqa", 1.120),
+    ("attn_dense_hd128_mqa", 1.133),
+    ("attn_dense_hd128_fp16", 1.098),
+    ("attn_dense_hd128_softcap", 2.362),
+    ("attn_dense_hd128_local", 1.043),
+    ("attn_dense_hd128_oddseq", 1.388),
+    ("attn_dense_hd128_seq256", 1.456),
+    ("attn_dense_hd128_large4k", 0.941),
+    ("attn_dense_hd128_splits3", 3.375),
+    ("attn_varlen_hd128_causal", 1.307),
+    ("attn_varlen_hd128_noncausal", 1.466),
+    ("attn_varlen_hd64_causal", 1.424),
+    ("attn_varlen_hd128_mqa", 1.304),
+    ("attn_kv_hd128_decode_mha", 1.036),
+    ("attn_kv_hd128_decode_gqa5", 1.338),
+    ("attn_kv_hd128_decode_mqa32", 1.423),
+    ("attn_kv_hd128_decode_qlen120", 0.687),
+    ("attn_kv_hd128_decode_qlen8", 0.974),
+    ("attn_kv_hd64_decode_gqa3", 1.500),
+    ("attn_kv_hd128_decode_noncausal", 1.358),
+    ("attn_kv_hd128_split2", 1.200),
+    ("attn_kv_hd128_local_decode", 1.373),
+    ("attn_kv_hd128_page1", 1.427),
+    ("attn_kv_hd128_page4", 1.430),
+    ("attn_kv_hd128_page128", 1.432),
+    ("attn_kv_hd128_ctx20k", 0.790),
+    ("attn_kv_hd128_prefill3577", 0.665),
+    ("attn_kv_hd128_dec339", 1.100),
+    ("attn_kv_hd128_dec1024", 1.407),
+    ("attn_kv_hd128_dec800", 1.070),
+    ("attn_dense_hd192_dv128", 1.062),
+    ("attn_varlen_hd192_dv128", 1.241),
+    ("attn_dense_hd64_fp16", 1.289),
+    ("attn_kv_hd128_fp16_decode", 1.111),
+    ("attn_dense_hd128_kgtq", 1.328),
+    ("attn_dense_hd128_deg_q239k1", 1.596),
+    ("attn_dense_hd128_local_noncausal", 0.991),
+    ("attn_varlen_hd128_local", 1.311),
+    ("attn_dense_hd128_softcap_gqa", 1.988),
+    ("attn_dense_hd128_sink", 1.020),
+    ("attn_varlen_hd128_sink", 1.094),
+    ("attn_dense_hd128_seq8k", 0.853),
+    ("attn_dense_hd128_seq16k", 0.826),
+    # --- real production shapes from nvidia/SOL-ExecBench (folded in; `python -m bench.eval_fa4 --set real`) ---
+    # Llama-3.1-8B (h32/kv8/d128) + Qwen3-30B-A3B (h32/kv4/d128), page_size 1. We beat FA4 on short-context
+    # decode (the highest-volume serving op); long-context decode is competitive; paged prefill trails
+    # (KV-feed-latency-bound, lifted ~+30% by Tier-2 Lever-2). (attn_real_llama8b_pf_ragged omitted: ws2 varlen hang.)
+    ("attn_real_llama8b_dec_s512", 1.340),
+    ("attn_real_qwen3moe_dec_s512", 1.291),
+    ("attn_real_qwen3moe_dec_s4k", 0.921),
+    ("attn_real_llama8b_dec_s4k", 0.725),
+    ("attn_real_llama8b_pf_s2k", 0.640),
+    ("attn_real_qwen3moe_pf_s4k", 0.557),
+]
+
+# Tier colors (match the canvas: success / info / warning / danger).
+_GREEN, _BLUE, _AMBER, _RED = "#2e9e5b", "#2f6fb0", "#e0a020", "#cf4040"
+
+
+def _color_fa3(r: float) -> str:
+    if r >= 1.0:
+        return _GREEN
+    if r >= 0.95:
+        return _BLUE
+    if r >= 0.85:
+        return _AMBER
+    return _RED
+
+
+def _color_fa4(r: float) -> str:
+    if r >= 1.0:
+        return _GREEN
+    if r >= 0.85:
+        return _BLUE
+    if r >= 0.65:
+        return _AMBER
+    return _RED
+
+
+def _geomean(xs):
+    return math.exp(sum(math.log(x) for x in xs) / len(xs))
+
+
+def _render(results, *, out, color_fn, title, xlabel, xlim, legend, figsize, parity=1.0):
+    rows = sorted(results, key=lambda x: x[1])   # ascending -> worst at bottom
+    names = [n for n, _ in rows]
+    vals = [v for _, v in rows]
+    colors = [color_fn(v) for v in vals]
+
+    fig, ax = plt.subplots(figsize=figsize)
+    y = range(len(rows))
+    ax.barh(list(y), vals, color=colors, height=0.72, zorder=3)
+
+    for yi, v in zip(y, vals):
+        ax.text(v + (xlim[1] - xlim[0]) * 0.004, yi, f"{v:.3f}\u00d7",
+                va="center", ha="left", fontsize=7.5, color="#333")
+
+    ax.axvline(parity, color="#888", linestyle="--", linewidth=1.2, zorder=2)
+    ax.text(parity, len(rows) - 0.2, " parity", color="#666", fontsize=8, va="top", ha="left")
+
+    ax.set_yticks(list(y))
+    ax.set_yticklabels(names, fontsize=7.5)
+    ax.set_ylim(-0.7, len(rows) - 0.3)
+    ax.set_xlim(*xlim)
+    ax.set_xlabel(xlabel, fontsize=10)
+    ax.set_title(title, fontsize=12, pad=12)
+    ax.grid(axis="x", color="#e6e6e6", zorder=0)
+    ax.set_axisbelow(True)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    ax.legend(handles=legend, loc="lower right", fontsize=8, frameon=True, framealpha=0.9)
+
+    fig.tight_layout()
+    fig.savefig(out, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    print(f"wrote {out}")
+    return out
+
+
+def plot_hopper() -> str:
+    vals = [v for _, v in RESULTS]
+    gm, median = _geomean(vals), sorted(vals)[len(vals) // 2]
+    n_ge1 = sum(1 for v in vals if v >= 1.0)
+    n_real = sum(1 for n, _ in RESULTS if n.startswith("attn_real_"))
+    n_attn = len(RESULTS) - n_real
+    legend = [
+        Patch(color=_GREEN, label="\u22651.0\u00d7 (beat FA3)"),
+        Patch(color=_BLUE, label="0.95\u20131.0\u00d7"),
+        Patch(color=_AMBER, label="0.85\u20130.95\u00d7"),
+        Patch(color=_RED, label="<0.85\u00d7"),
+    ]
+    return _render(
+        RESULTS, out=os.path.join(_DOCS, "per_scenario_speedup.png"), color_fn=_color_fa3,
+        title=(f"Per-scenario speedup vs FA3 ({len(RESULTS)} scenarios, all numerically correct, sorted)\n"
+               f"geomean {gm:.3f}\u00d7 \u00b7 median {median:.3f}\u00d7 \u00b7 {n_ge1}\u22651.0\u00d7 \u00b7 "
+               f"{n_attn} attntest + {n_real} SOL-ExecBench real shapes"),
+        xlabel="Speedup  (FA3 time / our time;  > 1 = we are faster)",
+        xlim=(0.10, 1.57), legend=legend, figsize=(9.5, 20.5))
+
+
+def plot_blackwell() -> str:
+    vals = [v for _, v in BLACKWELL_RESULTS]
+    gm, median = _geomean(vals), sorted(vals)[len(vals) // 2]
+    n_par = sum(1 for v in vals if v >= 1.0)
+    legend = [
+        Patch(color=_GREEN, label="\u22651.0\u00d7 (match/beat FA4)"),
+        Patch(color=_BLUE, label="0.85\u20131.0\u00d7"),
+        Patch(color=_AMBER, label="0.65\u20130.85\u00d7"),
+        Patch(color=_RED, label="<0.65\u00d7"),
+    ]
+    return _render(
+        BLACKWELL_RESULTS, out=os.path.join(_DOCS, "blackwell_fa4_speedup.png"), color_fn=_color_fa4,
+        title=(f"Blackwell (SM100) fa4_blackwell.cu vs FA4 oracle ({len(BLACKWELL_RESULTS)} scenarios, all correct, sorted)\n"
+               f"geomean {gm:.3f}\u00d7 \u00b7 median {median:.3f}\u00d7 \u00b7 {n_par}\u22651.0\u00d7 \u00b7 48 attntest (10 fp8/hd\u2265192 not built) + 6 SOL-ExecBench real shapes"),
+        xlabel="Speed  (FA4 time / our time;  1.0 = parity with the FA4 oracle)",
+        xlim=(0.1, 2.15), legend=legend, figsize=(9.5, 15.0))
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--arch", choices=["hopper", "blackwell", "both"], default="both")
+    args = ap.parse_args()
+    if args.arch in ("hopper", "both"):
+        plot_hopper()
+    if args.arch in ("blackwell", "both"):
+        plot_blackwell()
+
+
+if __name__ == "__main__":
+    main()

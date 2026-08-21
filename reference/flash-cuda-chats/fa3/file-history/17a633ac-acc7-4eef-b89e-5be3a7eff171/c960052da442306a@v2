@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# ncu_diff.sh — profile a kernel with the FA3-distillation metric bundle, and (optionally) diff
+# "ours" vs the reference on the SAME shape. Portable helper for the distill-kernel skill.
+#
+# The governing rule this encodes: profile OURS + profile the REFERENCE on the same shape ->
+# the DIFFERENCE is the gap -> only then trace source for that one mechanism.
+#
+# Usage:
+#   ncu_diff.sh run   "<command to run one launch>"           # metrics for one kernel
+#   ncu_diff.sh run   "<cmd>" --skip 20                       # skip warmup launches, profile 1
+#   ncu_diff.sh diff  "<ours cmd>" "<reference cmd>"          # side-by-side (run both, eyeball)
+#   ncu_diff.sh source "<cmd>"                                # PC-sampling: rank SASS by long_scoreboard
+#
+# Notes:
+#   * --launch-skip is the #1 gotcha: skip past warmup but NOT past the last launch (skip=80 with 55
+#     launches profiles nothing). Default 20; tune to your warmup count.
+#   * Lock clocks first (sudo nvidia-smi -lgc <max>) and timeout-wrap the command (deadlocks are real).
+#   * Stall-reason cheat-sheet: long_scoreboard=global loads, short_scoreboard=smem, barrier=handshake,
+#     wait=wgmma drain, mio_throttle=LSU, math_pipe_throttle=SFU/FMA (exposed softmax).
+
+set -uo pipefail
+
+M="sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active,\
+sm__warps_active.avg.pct_of_peak_sustained_active,\
+sm__throughput.avg.pct_of_peak_sustained_elapsed,\
+gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed,\
+lts__throughput.avg.pct_of_peak_sustained_elapsed,\
+l1tex__throughput.avg.pct_of_peak_sustained_elapsed,\
+sm__pipe_fma_cycles_active.avg.pct_of_peak_sustained_active,\
+launch__registers_per_thread,\
+launch__occupancy_limit_registers,launch__occupancy_limit_shared_mem,\
+smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio,\
+smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio,\
+smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio,\
+smsp__average_warps_issue_stalled_wait_per_issue_active.ratio,\
+smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio,\
+smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio"
+
+SKIP=20
+# strip a trailing "--skip N"
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  if [[ "${args[$i]}" == "--skip" ]]; then SKIP="${args[$((i+1))]}"; fi
+done
+
+mode="${1:-}"; shift || true
+
+case "$mode" in
+  run)
+    cmd="$1"
+    echo "# metrics (launch-skip $SKIP): $cmd"
+    ncu --launch-skip "$SKIP" --launch-count 1 --metrics "$M" $cmd
+    ;;
+  diff)
+    ours="$1"; ref="$2"
+    echo "=========================== OURS ==========================="
+    ncu --launch-skip "$SKIP" --launch-count 1 --metrics "$M" $ours
+    echo "======================== REFERENCE ========================="
+    ncu --launch-skip "$SKIP" --launch-count 1 --metrics "$M" $ref
+    echo "# Now read the DIFF: any metric already at parity is not the gap."
+    ;;
+  source)
+    cmd="$1"
+    rep="$(mktemp -u).ncu-rep"
+    ncu -o "${rep%.ncu-rep}" -f --set full --launch-skip "$SKIP" --launch-count 1 $cmd
+    echo "# top SASS lines by long_scoreboard (CSV --page source):"
+    ncu -i "$rep" --page source --csv 2>/dev/null | head -40
+    echo "# full report at $rep — open with: ncu-ui $rep"
+    ;;
+  *)
+    sed -n '2,30p' "$0"
+    ;;
+esac

@@ -1,0 +1,10 @@
+# Never archive secrets / tokens
+**/settings.json
+**/.lock
+
+*.so
+*.ptx
+*.cubin
+*.ncu-rep
+__pycache__/
+

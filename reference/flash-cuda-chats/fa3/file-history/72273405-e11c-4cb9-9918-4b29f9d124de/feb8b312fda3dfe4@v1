@@ -1,0 +1,353 @@
+"""Self-contained config matrix + build/tolerance constants for the fa3-cuda harness.
+
+This is the in-repo replacement for the external agent's `fa3agent.config`: it defines the
+attention problem instances (the `attntest` set mirrored from FlashAttention-3's own forward
+pytest grids) and the constants the build / correctness / perf code need. No dependency on
+anything outside this repo (the FA3 baseline itself comes from an installed vLLM, which is the
+thing we benchmark against).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field, asdict
+from typing import Optional
+
+# --- target / toolchain -----------------------------------------------------------------
+GPU_GENCODE = "arch=compute_90a,code=sm_90a"
+
+# Toolkit-only nvcc flags (no cutlass/cute include path). Mirrors how the kernel was built
+# when the per-scenario numbers were produced.
+NVCC_BASE_FLAGS = [
+    "-O3", "-std=c++17", "--use_fast_math",
+    "--expt-relaxed-constexpr", "--expt-extended-lambda",
+    "-gencode", GPU_GENCODE,
+    "-lineinfo",
+]
+# Semantic defs matching the vLLM FA3 build surface (forward / varlen / packgqa only). The
+# kernel only requires -DFA3_LIB_NAME, but these are kept for build-surface parity.
+SEMANTIC_DEFS = [
+    "FLASHATTENTION_DISABLE_BACKWARD", "FLASHATTENTION_DISABLE_DROPOUT",
+    "FLASHATTENTION_DISABLE_APPENDKV", "FLASHATTENTION_DISABLE_SM8x",
+    "FLASHATTENTION_DISABLE_CLUSTER", "FLASHATTENTION_DISABLE_UNEVEN_K",
+    "FLASHATTENTION_VARLEN_ONLY", "FLASHATTENTION_PACKGQA_ONLY",
+]
+
+# --- explicitly OUT OF SCOPE (so "all FA3 forward scenarios" is unambiguous) -------------
+# FA3's forward pytest grids also exercise the following, which this build/harness deliberately
+# does NOT cover (they are disabled above and/or pinned to defaults in shapes.fwd_args):
+#   * backward + dropout                              (DISABLE_BACKWARD / DISABLE_DROPOUT)
+#   * appendKV (new_kv) + rotary insertion            (DISABLE_APPENDKV; k_new/v_new/rotary_* = None)
+#   * cluster launch                                  (DISABLE_CLUSTER; FA3 test_flash_attn_cluster)
+#   * uneven-K (seqlen_k not a tile multiple)         (DISABLE_UNEVEN_K; e.g. (1023,1024)/(1024,1023))
+#   * pack_gqa = False                                (PACKGQA_ONLY; FA3 tests both True/False)
+#   * the dense BSHD entry point                      (VARLEN_ONLY; even "dense" cfgs go via varlen)
+#   * context parallelism (cp_world_size > 1)         (pinned cp_world_size=1 in fwd_args)
+#   * cache_batch_idx / seqused_q < q_len             (pinned None in fwd_args)
+# Everything else FA3's forward grids touch IS represented in the attntest set below.
+
+# Prebuilt FA3 baseline ("the oracle") shipped inside the installed vLLM.
+BASELINE_NS = "_vllm_fa3_C"
+
+# --- dtypes -----------------------------------------------------------------------------
+DTYPES = ("bf16", "fp16", "fp8e4m3")
+TORCH_DTYPE = {"bf16": "bfloat16", "fp16": "float16", "fp8e4m3": "float8_e4m3fn"}
+
+
+@dataclass(frozen=True)
+class Config:
+    name: str
+    phase: str               # "prefill" | "decode"
+    dtype: str               # one of DTYPES
+    head_dim: int
+    num_heads_q: int
+    num_heads_kv: int
+    causal: bool = True
+    paged: bool = True        # paged KV cache (decode) vs contiguous varlen (prefill)
+    block_size: int = 16
+    num_splits: int = 0       # 0 = FA3 auto-heuristic; 1 = forced single; >1 forced split
+    softcap: float = 0.0
+    window_left: int = -1     # -1 = no sliding window
+    window_right: int = -1
+    sink: bool = False        # attention sink: per-(query)head s_aux logit added to the softmax denom
+    leftpad: int = 0          # cache_leftpad: ignore the first `leftpad` KV tokens (paged decode)
+    batch: int = 1
+    q_len: int = 1            # per-sequence query length (decode=1; prefill=prompt len)
+    k_len: int = 256          # per-sequence kv/context length
+    head_dim_v: Optional[int] = None  # defaults to head_dim
+    mix: Optional[tuple] = None        # ((q_len,k_len),...) ragged/MIXED batch; overrides batch/q/k
+    weight: float = 1.0
+
+    @property
+    def hdv(self) -> int:
+        return self.head_dim_v if self.head_dim_v is not None else self.head_dim
+
+    @property
+    def requests(self):
+        """Per-request (q_len, k_len). Uniform (`batch` copies) unless `mix` is set."""
+        if self.mix:
+            return [(int(q), int(k)) for q, k in self.mix]
+        return [(self.q_len, self.k_len)] * self.batch
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+# --- FA3TEST set: scenarios mirrored from FlashAttention-3's OWN forward pytest grids -----
+# Source: vllm-flash-attention/hopper/test_flash_attn.py (dense flash_attn_func + varlen
+# flash_attn_varlen_func) and hopper/test_attn_kvcache.py (kvcache decode + split-KV). A
+# curated, deduplicated sample spanning every axis the kernel + harness can express.
+def _attntest_configs() -> list[Config]:
+    cfgs: list[Config] = []
+
+    # === A) Dense flash_attn_func (non-paged, nheads=16) ================================
+    for hd in (64, 96, 128, 192, 256):
+        cfgs.append(Config(f"attn_dense_hd{hd}_causal", "prefill", "bf16", hd, 16, 16,
+                           paged=False, causal=True, batch=9, q_len=1024, k_len=1024))
+    cfgs.append(Config("attn_dense_hd128_noncausal", "prefill", "bf16", 128, 16, 16,
+                       paged=False, causal=False, batch=9, q_len=1024, k_len=1024))
+    cfgs.append(Config("attn_dense_hd128_nc4k", "prefill", "bf16", 128, 16, 16,
+                       paged=False, causal=False, batch=2, q_len=4096, k_len=4096))
+    cfgs.append(Config("attn_dense_hd128_gqa", "prefill", "bf16", 128, 16, 2,
+                       paged=False, causal=True, batch=9, q_len=1024, k_len=1024))
+    cfgs.append(Config("attn_dense_hd128_mqa", "prefill", "bf16", 128, 16, 1,
+                       paged=False, causal=True, batch=9, q_len=1024, k_len=1024))
+    cfgs.append(Config("attn_dense_hd128_fp16", "prefill", "fp16", 128, 16, 16,
+                       paged=False, causal=True, batch=9, q_len=1024, k_len=1024))
+    cfgs.append(Config("attn_dense_hd128_fp8", "prefill", "fp8e4m3", 128, 16, 16,
+                       paged=False, causal=True, batch=9, q_len=1024, k_len=1024))
+    cfgs.append(Config("attn_dense_hd128_softcap", "prefill", "bf16", 128, 16, 16,
+                       paged=False, causal=True, batch=9, q_len=1024, k_len=1024, softcap=15.0))
+    cfgs.append(Config("attn_dense_hd128_local", "prefill", "bf16", 128, 16, 2,
+                       paged=False, causal=True, batch=9, q_len=1024, k_len=1024,
+                       window_left=256, window_right=0))
+    cfgs.append(Config("attn_dense_hd128_oddseq", "prefill", "bf16", 128, 16, 2,
+                       paged=False, causal=True, batch=9, q_len=113, k_len=203))
+    cfgs.append(Config("attn_dense_hd128_seq256", "prefill", "bf16", 128, 16, 16,
+                       paged=False, causal=True, batch=9, q_len=256, k_len=256))
+    cfgs.append(Config("attn_dense_hd128_large4k", "prefill", "bf16", 128, 16, 16,
+                       paged=False, causal=True, batch=2, q_len=4096, k_len=4096))
+    cfgs.append(Config("attn_dense_hd128_splits3", "prefill", "bf16", 128, 16, 2,
+                       paged=False, causal=True, batch=9, q_len=1024, k_len=1024, num_splits=3))
+
+    # === B) Varlen flash_attn_varlen_func (ragged, nheads=6) ===========================
+    _vmix = tuple([(256, 256), (113, 203), (128, 217), (108, 256), (64, 128), (128, 128)])
+    cfgs.append(Config("attn_varlen_hd128_causal", "prefill", "bf16", 128, 6, 2,
+                       paged=False, causal=True, mix=_vmix))
+    cfgs.append(Config("attn_varlen_hd128_noncausal", "prefill", "bf16", 128, 6, 2,
+                       paged=False, causal=False, mix=_vmix))
+    cfgs.append(Config("attn_varlen_hd64_causal", "prefill", "bf16", 64, 6, 6,
+                       paged=False, causal=True, mix=_vmix))
+    cfgs.append(Config("attn_varlen_hd128_mqa", "prefill", "bf16", 128, 6, 1,
+                       paged=False, causal=True, mix=_vmix))
+
+    # === C) KV-cache decode / split-KV (paged) =========================================
+    cfgs.append(Config("attn_kv_hd128_decode_mha", "decode", "bf16", 128, 8, 8,
+                       paged=True, causal=True, batch=4, q_len=1, k_len=4224))
+    cfgs.append(Config("attn_kv_hd128_decode_gqa5", "decode", "bf16", 128, 10, 2,
+                       paged=True, causal=True, batch=4, q_len=1, k_len=3131))
+    cfgs.append(Config("attn_kv_hd128_decode_mqa32", "decode", "bf16", 128, 32, 1,
+                       paged=True, causal=True, batch=1, q_len=1, k_len=1024))
+    cfgs.append(Config("attn_kv_hd128_decode_qlen120", "decode", "bf16", 128, 16, 8,
+                       paged=True, causal=True, batch=4, q_len=120, k_len=4224))
+    cfgs.append(Config("attn_kv_hd128_decode_qlen8", "decode", "bf16", 128, 16, 8,
+                       paged=True, causal=True, batch=4, q_len=8, k_len=4224))
+    cfgs.append(Config("attn_kv_hd64_decode_gqa3", "decode", "bf16", 64, 9, 3,
+                       paged=True, causal=True, batch=4, q_len=1, k_len=3131))
+    cfgs.append(Config("attn_kv_hd256_decode_mqa16", "decode", "bf16", 256, 16, 1,
+                       paged=True, causal=True, batch=4, q_len=1, k_len=4224))
+    cfgs.append(Config("attn_kv_hd128_decode_noncausal", "decode", "bf16", 128, 8, 2,
+                       paged=True, causal=False, batch=4, q_len=1, k_len=3131))
+    cfgs.append(Config("attn_kv_hd128_fp8_decode", "decode", "fp8e4m3", 128, 16, 8,
+                       paged=True, causal=True, batch=3, q_len=1, k_len=4000))
+    cfgs.append(Config("attn_kv_hd128_split2", "decode", "bf16", 128, 16, 8,
+                       paged=True, causal=True, batch=3, q_len=1, k_len=5555, num_splits=2))
+    cfgs.append(Config("attn_kv_hd256_split_auto", "decode", "bf16", 256, 9, 3,
+                       paged=True, causal=True, batch=3, q_len=1, k_len=4000, num_splits=0))
+    cfgs.append(Config("attn_kv_hd128_local_decode", "decode", "bf16", 128, 8, 2,
+                       paged=True, causal=False, batch=4, q_len=1, k_len=4096,
+                       window_left=1024, window_right=0))
+
+    # === D) KV-cache hd128 page_size variants + long ctx ===============================
+    for ps in (1, 4, 128):
+        cfgs.append(Config(f"attn_kv_hd128_page{ps}", "decode", "bf16", 128, 6, 2,
+                           paged=True, causal=True, block_size=ps, batch=5, q_len=1, k_len=2048))
+    cfgs.append(Config("attn_kv_hd128_ctx20k", "prefill", "bf16", 128, 6, 2,
+                       paged=True, causal=True, batch=5, q_len=16, k_len=20000))
+    cfgs.append(Config("attn_kv_hd128_prefill3577", "prefill", "bf16", 128, 6, 2,
+                       paged=True, causal=True, batch=5, q_len=2048, k_len=3577))
+    cfgs.append(Config("attn_kv_hd128_dec339", "decode", "bf16", 128, 6, 2,
+                       paged=True, causal=True, batch=5, q_len=1, k_len=339))
+    cfgs.append(Config("attn_kv_hd128_dec1024", "decode", "bf16", 128, 6, 2,
+                       paged=True, causal=True, batch=5, q_len=3, k_len=1024))
+    cfgs.append(Config("attn_kv_hd128_dec800", "decode", "bf16", 128, 6, 2,
+                       paged=True, causal=True, batch=5, q_len=64, k_len=800))
+
+    # === E) Coverage extensions (forward-only) =========================================
+    # Axes FA3's fwd grids exercise but sections A-D pinned to a single default. All stay
+    # within the in-scope op surface (see SEMANTIC_DEFS out-of-scope note above).
+
+    # -- head_dim_v != head_dim: the flash_fwd_hdimdiff_* instantiations (FA3 d=192 -> dv=128) --
+    cfgs.append(Config("attn_dense_hd192_dv128", "prefill", "bf16", 192, 16, 16,
+                       paged=False, causal=True, batch=9, q_len=1024, k_len=1024, head_dim_v=128))
+    cfgs.append(Config("attn_varlen_hd192_dv128", "prefill", "bf16", 192, 6, 2,
+                       paged=False, causal=True, mix=_vmix, head_dim_v=128))
+
+    # -- dtype breadth: fp16 across head dims + paged decode; fp8 across gqa/varlen/hd64 --
+    cfgs.append(Config("attn_dense_hd64_fp16", "prefill", "fp16", 64, 16, 16,
+                       paged=False, causal=True, batch=9, q_len=1024, k_len=1024))
+    cfgs.append(Config("attn_dense_hd192_fp16", "prefill", "fp16", 192, 16, 16,
+                       paged=False, causal=True, batch=9, q_len=1024, k_len=1024))
+    cfgs.append(Config("attn_dense_hd128_fp8_gqa", "prefill", "fp8e4m3", 128, 16, 2,
+                       paged=False, causal=True, batch=9, q_len=1024, k_len=1024))
+    cfgs.append(Config("attn_varlen_hd128_fp8", "prefill", "fp8e4m3", 128, 6, 2,
+                       paged=False, causal=True, mix=_vmix))
+    cfgs.append(Config("attn_kv_hd128_fp16_decode", "decode", "fp16", 128, 16, 8,
+                       paged=True, causal=True, batch=3, q_len=1, k_len=4000))
+    cfgs.append(Config("attn_kv_hd64_fp8_decode", "decode", "fp8e4m3", 64, 16, 8,
+                       paged=True, causal=True, batch=3, q_len=1, k_len=4000))
+
+    # -- masking edges: k>q, degenerate q>>k (mostly-masked rows), non-causal local, varlen local --
+    cfgs.append(Config("attn_dense_hd128_kgtq", "prefill", "bf16", 128, 16, 16,
+                       paged=False, causal=True, batch=9, q_len=256, k_len=512))
+    cfgs.append(Config("attn_dense_hd128_deg_q239k1", "prefill", "bf16", 128, 16, 16,
+                       paged=False, causal=True, batch=9, q_len=239, k_len=1))
+    cfgs.append(Config("attn_dense_hd128_local_noncausal", "prefill", "bf16", 128, 16, 2,
+                       paged=False, causal=False, batch=9, q_len=1024, k_len=1024,
+                       window_left=256, window_right=256))
+    cfgs.append(Config("attn_varlen_hd128_local", "prefill", "bf16", 128, 6, 2,
+                       paged=False, causal=True, mix=_vmix, window_left=128, window_right=0))
+
+    # -- softcap breadth (softcap x GQA) --
+    cfgs.append(Config("attn_dense_hd128_softcap_gqa", "prefill", "bf16", 128, 16, 2,
+                       paged=False, causal=True, batch=9, q_len=1024, k_len=1024, softcap=15.0))
+
+    # -- attention sink (s_aux): dense + varlen (FA3 test_sink) --
+    cfgs.append(Config("attn_dense_hd128_sink", "prefill", "bf16", 128, 16, 16,
+                       paged=False, causal=True, batch=9, q_len=1024, k_len=1024, sink=True))
+    cfgs.append(Config("attn_varlen_hd128_sink", "prefill", "bf16", 128, 6, 2,
+                       paged=False, causal=True, mix=_vmix, sink=True))
+
+    # -- cache_leftpad (paged decode: ignore the first L KV tokens) --
+    cfgs.append(Config("attn_kv_hd128_leftpad", "decode", "bf16", 128, 6, 2,
+                       paged=True, causal=True, batch=5, q_len=1, k_len=2048, leftpad=128))
+
+    # -- long-context prefill (FA3's steady-state design point; perf-relevant) --
+    cfgs.append(Config("attn_dense_hd128_seq8k", "prefill", "bf16", 128, 16, 16,
+                       paged=False, causal=True, batch=2, q_len=8192, k_len=8192))
+    cfgs.append(Config("attn_dense_hd128_seq16k", "prefill", "bf16", 128, 16, 16,
+                       paged=False, causal=True, batch=1, q_len=16384, k_len=16384))
+    return cfgs
+
+
+FA3TEST_CONFIGS = _attntest_configs()
+
+
+# --- EDGE set: dense seqlen/masking correctness grid (mirrors FlashAttention-4's own grid) ---
+# FA4's cute pytest (tests/cute/test_flash_attn.py) sweeps ~27 (seqlen_q, seqlen_k) pairs crossed
+# with causal / local / softcap to stress masking, boundary and tail handling. FA3TEST samples
+# only a few; this set adds the boundary / off-by-one / tail pairs it misses, crossed with causal
+# + noncausal + sliding-window + GQA. Small shapes (nheads<=8, batch 2) -> primarily a CORRECTNESS
+# grid (run with --no-perf); it also exercises the fa4/ws2 routing at odd tile alignments.
+def _edge_configs() -> list[Config]:
+    cfgs: list[Config] = []
+    # boundary / off-by-one / tail (seqlen_q, seqlen_k) pairs from FA4's grid not in FA3TEST
+    pairs = [(1, 1), (3, 3), (64, 1), (64, 32), (64, 128), (128, 192), (255, 256), (108, 256),
+             (113, 128), (113, 211), (128, 217), (799, 3), (384, 256), (640, 128), (512, 256),
+             (1023, 1024), (1024, 1023), (2048, 2048)]
+    for q, k in pairs:
+        cfgs.append(Config(f"attn_edge_causal_q{q}k{k}", "prefill", "bf16", 128, 8, 8,
+                           paged=False, causal=True, batch=2, q_len=q, k_len=k))
+    # non-causal (full attention) on a representative subset
+    for q, k in [(1, 1), (64, 128), (255, 256), (128, 217), (512, 256), (1024, 1023)]:
+        cfgs.append(Config(f"attn_edge_noncausal_q{q}k{k}", "prefill", "bf16", 128, 8, 8,
+                           paged=False, causal=False, batch=2, q_len=q, k_len=k))
+    # sliding-window (causal, left band) on odd shapes -> exercises n_lo/n_hi prune + band mask
+    for q, k, wl in [(128, 217, 64), (255, 256, 128), (512, 256, 128), (1024, 1023, 256)]:
+        cfgs.append(Config(f"attn_edge_local_q{q}k{k}", "prefill", "bf16", 128, 8, 2,
+                           paged=False, causal=True, batch=2, q_len=q, k_len=k,
+                           window_left=wl, window_right=0))
+    # GQA (hkv=2) on odd shapes -> head replication + masking at odd alignments
+    for q, k in [(113, 211), (384, 256), (640, 128)]:
+        cfgs.append(Config(f"attn_edge_gqa_q{q}k{k}", "prefill", "bf16", 128, 8, 2,
+                           paged=False, causal=True, batch=2, q_len=q, k_len=k))
+    return cfgs
+
+
+# --- REAL set: production attention shapes from nvidia/SOL-ExecBench (B200 kernel benchmark) --
+# Real captured GQA shapes: Llama-3.1-8B (h32 / kv8 / d128, GQA 4:1) and Qwen3-30B-A3B
+# (h32 / kv4 / d128, GQA 8:1), page_size 1 — decode + causal prefill + ragged prefill. (The
+# dataset's MLA h16/ckv512/kpe64 and fp8 paths are outside our kernel's supported envelope.)
+# These use 32 q-heads (vs FA3TEST's 16) + realistic GQA ratios -> perf-representative of serving.
+def _real_configs() -> list[Config]:
+    cfgs: list[Config] = []
+    # Decode (q=1, paged page_size 1), batched serving, short + long context
+    cfgs.append(Config("attn_real_llama8b_dec_s512", "decode", "bf16", 128, 32, 8,
+                       paged=True, causal=True, block_size=1, batch=16, q_len=1, k_len=512))
+    cfgs.append(Config("attn_real_llama8b_dec_s4k", "decode", "bf16", 128, 32, 8,
+                       paged=True, causal=True, block_size=1, batch=16, q_len=1, k_len=4096))
+    cfgs.append(Config("attn_real_qwen3moe_dec_s512", "decode", "bf16", 128, 32, 4,
+                       paged=True, causal=True, block_size=1, batch=16, q_len=1, k_len=512))
+    cfgs.append(Config("attn_real_qwen3moe_dec_s4k", "decode", "bf16", 128, 32, 4,
+                       paged=True, causal=True, block_size=1, batch=16, q_len=1, k_len=4096))
+    # Causal prefill (paged, page_size 1)
+    cfgs.append(Config("attn_real_llama8b_pf_s2k", "prefill", "bf16", 128, 32, 8,
+                       paged=True, causal=True, block_size=1, batch=2, q_len=2048, k_len=2048))
+    cfgs.append(Config("attn_real_qwen3moe_pf_s4k", "prefill", "bf16", 128, 32, 4,
+                       paged=True, causal=True, block_size=1, batch=1, q_len=4096, k_len=4096))
+    # Ragged varlen prefill (SOL gqa_ragged_prefill), realistic prompt-length mix
+    _rmix = tuple([(512, 512), (1024, 1024), (256, 256), (2048, 2048), (128, 128), (768, 768)])
+    cfgs.append(Config("attn_real_llama8b_pf_ragged", "prefill", "bf16", 128, 32, 8,
+                       paged=False, causal=True, mix=_rmix))
+    return cfgs
+
+
+EDGE_CONFIGS = _edge_configs()
+REAL_CONFIGS = _real_configs()
+
+# Shapes the dense edge/real grid surfaced as fwd_kernel_ws2 bugs. The DENSE ones (q512k256 wrong,
+# q799k3/q640k128 hangs) were FIXED 2026-07 by routing uniform-dense sub-wave grids to fwd_kernel_fa4
+# (grid_fill's dense_uniform term in launch_ws) -- fa4 is correct on them AND beats FA4 (1.5-1.8x). The
+# remaining deferred bug is ws2 VARLEN (h32 ragged mix), which must stay on ws2 (sub-wave varlen has no
+# amortization headroom for persistent fa4; the h6 varlen configs beat FA4 there). Excluded from the
+# green sets so default runs don't wedge. Run `get_configs("known_bad")` when fixing the ws2 varlen path.
+KNOWN_WS2_BUGS = {
+    "attn_real_llama8b_pf_ragged": "HANG: ws2 varlen (h32 ragged mix) did not complete at 100% GPU",
+}
+
+_CONFIG_SETS = {"attntest": FA3TEST_CONFIGS, "edge": EDGE_CONFIGS, "real": REAL_CONFIGS}
+
+
+def _drop_known_bad(cfgs: list[Config]) -> list[Config]:
+    return [c for c in cfgs if c.name not in KNOWN_WS2_BUGS]
+
+
+def get_configs(which: str = "attntest") -> list[Config]:
+    """Named config sets. edge/real/all EXCLUDE KNOWN_WS2_BUGS (green + no GPU wedge); pass
+    'known_bad' to get exactly those bug-triggering shapes (for the deferred ws2 fix)."""
+    everything = FA3TEST_CONFIGS + EDGE_CONFIGS + REAL_CONFIGS
+    if which == "known_bad":
+        return [c for c in everything if c.name in KNOWN_WS2_BUGS]
+    if which == "all":
+        return _drop_known_bad(everything)
+    if which in _CONFIG_SETS:
+        return _drop_known_bad(_CONFIG_SETS[which])
+    raise ValueError(f"unknown config set {which!r} (attntest | edge | real | all | known_bad)")
+
+
+
+# --- tolerances (fp32-reference 2x-error criterion + coarse allclose/bias/lse gates) -----
+ERR_MULT = 2.0
+ALLCLOSE_TOL = {  # (atol, rtol) per dtype, for out
+    "bf16": (8e-3, 1e-2),
+    "fp16": (1e-3, 1e-2),
+    "fp8e4m3": (1e-1, 5e-2),
+}
+MEAN_ABS_TOL = {"bf16": 5e-4, "fp16": 1e-4, "fp8e4m3": 1e-2}
+LSE_TOL = (5e-3, 1e-2)
+
+# --- perf knobs (CUDA events; clocks unlockable -> warm + ratio) -------------------------
+PERF = dict(
+    warmup_iters=300,
+    timed_iters=100,
+    num_trials=5,
+    l2_flush_mb=128,
+)

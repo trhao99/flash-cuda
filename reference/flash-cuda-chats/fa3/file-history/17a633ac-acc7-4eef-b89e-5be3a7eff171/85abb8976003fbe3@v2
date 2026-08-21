@@ -1,0 +1,318 @@
+"""Self-contained evaluator for kernels/fa3_hopper.cu (no dependency on the agent folder).
+
+Builds the candidate `.cu` ONCE into a torch op `.so`, then reports correctness AND performance
+vs the real FA3 (`_vllm_fa3_C`, shipped inside an installed vLLM) over the `fa3test` scenario set.
+
+    cd /home/yak/fa3-cuda
+    python -m bench.eval                         # the full fa3test scenario set
+    python -m bench.eval --configs fa3_dense_hd128_causal,fa3_dense_hd128_fp8
+    python -m bench.eval --no-perf               # build + correctness only
+    python -m bench.eval --gpu 1 --cand kernels/fa3_hopper.cu
+
+If vLLM (the FA3 baseline) is not importable, correctness falls back to an absolute fp32-ref
+tolerance and perf is skipped (the speedup ratio is meaningless without the baseline).
+"""
+from __future__ import annotations
+
+import argparse
+import math
+import os
+import statistics
+import time
+from typing import Optional
+
+import torch
+
+from . import config as C
+from . import shapes
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_EPS = 1e-12
+
+
+# --------------------------------------------------------------------------------------
+# build
+# --------------------------------------------------------------------------------------
+def _driver_ldflags() -> list[str]:
+    """Link libcuda (driver stub) so host code can call cuTensorMapEncodeTiled (TMA)."""
+    flags: list[str] = []
+    try:
+        from torch.utils.cpp_extension import CUDA_HOME  # type: ignore
+    except Exception:
+        CUDA_HOME = None
+    cuda_home = CUDA_HOME or os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    for sub in ("lib64/stubs", "lib/stubs", "targets/x86_64-linux/lib/stubs"):
+        if cuda_home:
+            d = os.path.join(cuda_home, *sub.split("/"))
+            if os.path.isdir(d):
+                flags.append(f"-L{d}")
+    flags.append("-lcuda")
+    return flags
+
+
+def build_candidate(cu_path: str, namespace: str, work_dir: str) -> str:
+    """Compile `cu_path` into a torch op library registering `namespace`. Returns the .so path.
+
+    Raises RuntimeError on build failure or if the op fails to register.
+    """
+    from torch.utils.cpp_extension import load as cpp_load
+
+    if not os.path.isfile(cu_path):
+        raise RuntimeError(f"source not found: {cu_path}")
+    os.makedirs(work_dir, exist_ok=True)
+
+    extra_cuda_cflags = (
+        list(C.NVCC_BASE_FLAGS)
+        + [f"-DFA3_LIB_NAME={namespace}"]
+        + [f"-D{d}" for d in C.SEMANTIC_DEFS]
+    )
+    cpp_load(
+        name=namespace,
+        sources=[cu_path],
+        is_python_module=False,
+        build_directory=work_dir,
+        extra_cuda_cflags=extra_cuda_cflags,
+        extra_ldflags=_driver_ldflags(),
+        verbose=True,
+    )
+    ns = getattr(torch.ops, namespace, None)
+    if ns is None or getattr(ns, "fwd", None) is None:
+        raise RuntimeError(f"built {namespace}.so but torch.ops.{namespace}.fwd not registered")
+    return os.path.join(work_dir, f"{namespace}.so")
+
+
+# --------------------------------------------------------------------------------------
+# baseline (FA3 inside vLLM)
+# --------------------------------------------------------------------------------------
+def load_baseline() -> bool:
+    """Import vLLM's FA3 so torch.ops._vllm_fa3_C.fwd is registered. Returns availability."""
+    if hasattr(torch.ops, C.BASELINE_NS) and hasattr(getattr(torch.ops, C.BASELINE_NS), "fwd"):
+        return True
+    try:
+        import vllm.vllm_flash_attn._vllm_fa3_C  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+# --------------------------------------------------------------------------------------
+# correctness
+# --------------------------------------------------------------------------------------
+def _maxabs(t: torch.Tensor) -> float:
+    return 0.0 if t.numel() == 0 else float(t.abs().max().item())
+
+
+class _Result:
+    __slots__ = ("name", "correct", "unsup", "err_ratio", "ratio", "base_ms", "cand_ms", "note")
+
+    def __init__(self, name):
+        self.name = name
+        self.correct = False
+        self.unsup = False
+        self.err_ratio = 0.0
+        self.ratio: Optional[float] = None
+        self.base_ms: Optional[float] = None
+        self.cand_ms: Optional[float] = None
+        self.note = ""
+
+
+def check_correctness(cfg: C.Config, namespace: str, baseline: bool, seed: int = 0) -> _Result:
+    res = _Result(cfg.name)
+    inp = shapes.make_inputs(cfg, seed, device="cuda")
+    ref = shapes.ref_fp32(inp).float()
+
+    try:
+        cand_out, cand_lse = shapes.call_fwd(namespace, inp)
+    except Exception as e:
+        res.note = f"candidate fwd raised: {type(e).__name__}: {e}"[:200]
+        if "unsupported" in res.note.lower():
+            res.unsup = True
+        return res
+
+    cand_out_f = cand_out.float()
+    cand_lse_f = cand_lse.float()
+    if not torch.isfinite(cand_out_f).all():
+        res.note = "candidate out has NaN/inf"
+        return res
+
+    if baseline:
+        base_out, base_lse = shapes.call_fwd(C.BASELINE_NS, inp)
+        base_out_f = base_out.float()
+        base_lse_f = base_lse.float()
+        baseline_err = _maxabs(base_out_f - ref)
+
+        if cand_out_f.shape != base_out_f.shape:
+            res.note = f"out shape {tuple(cand_out_f.shape)} != baseline {tuple(base_out_f.shape)}"
+            return res
+
+        out_err = _maxabs(cand_out_f - ref)
+        res.err_ratio = out_err / (baseline_err + _EPS)
+        bias = float((cand_out_f - base_out_f).abs().mean().item()) if cand_out_f.numel() else 0.0
+
+        finite = torch.isfinite(cand_lse_f) & torch.isfinite(base_lse_f)
+        atol, rtol = C.ALLCLOSE_TOL[cfg.dtype]
+        allclose_ok = torch.allclose(cand_out_f, base_out_f, atol=atol, rtol=rtol)
+        lse_atol, lse_rtol = C.LSE_TOL
+        lse_ok = (not finite.any()) or torch.allclose(
+            cand_lse_f[finite], base_lse_f[finite], atol=lse_atol, rtol=lse_rtol)
+
+        ratio_ok = res.err_ratio <= C.ERR_MULT
+        bias_ok = bias <= C.MEAN_ABS_TOL.get(cfg.dtype, 1e-2)
+        res.correct = bool(ratio_ok and allclose_ok and lse_ok and bias_ok)
+        if not res.correct:
+            fails = []
+            if not ratio_ok:
+                fails.append(f"err_ratio={res.err_ratio:.3f}>{C.ERR_MULT}")
+            if not allclose_ok:
+                fails.append(f"allclose fail (atol={atol},rtol={rtol})")
+            if not bias_ok:
+                fails.append(f"bias={bias:.3e}>{C.MEAN_ABS_TOL.get(cfg.dtype)}")
+            if not lse_ok:
+                fails.append("lse_err>tol")
+            res.note = "; ".join(fails)[:200]
+    else:
+        # No baseline: absolute fp32-ref tolerance (approximate; bf16/fp16/fp8 are noisy).
+        atol, rtol = C.ALLCLOSE_TOL[cfg.dtype]
+        out_err = _maxabs(cand_out_f - ref)
+        res.err_ratio = out_err
+        res.correct = bool(torch.allclose(cand_out_f, ref, atol=max(atol, 5e-2), rtol=max(rtol, 5e-2)))
+        res.note = "" if res.correct else f"fp32-ref max|Δ|={out_err:.3e} (no-baseline mode)"
+    return res
+
+
+# --------------------------------------------------------------------------------------
+# perf (interleaved CUDA-event timing; clocks unlockable -> ratio only)
+# --------------------------------------------------------------------------------------
+def _time_kernel(namespace, inp, flush, start, end) -> list[float]:
+    timed, trials = int(C.PERF["timed_iters"]), int(C.PERF["num_trials"])
+    samples = []
+    for _ in range(trials):
+        for _ in range(timed):
+            flush.zero_()
+            torch.cuda.synchronize()
+            start.record()
+            shapes.call_fwd(namespace, inp)
+            end.record()
+            torch.cuda.synchronize()
+            samples.append(start.elapsed_time(end))
+    return samples
+
+
+def measure(cfg: C.Config, namespace: str, gpu_id: int) -> _Result:
+    res = _Result(cfg.name)
+    res.correct = True
+    device = torch.device(f"cuda:{gpu_id}")
+    inp = shapes.make_inputs(cfg, seed=0, device=f"cuda:{gpu_id}")
+    flush = torch.empty(int(C.PERF["l2_flush_mb"]) * 1024 * 1024, dtype=torch.int8, device=device)
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+
+    warm = int(C.PERF["warmup_iters"])
+    for _ in range(warm):
+        shapes.call_fwd(C.BASELINE_NS, inp)
+        shapes.call_fwd(namespace, inp)
+    torch.cuda.synchronize()
+
+    base = _time_kernel(C.BASELINE_NS, inp, flush, start, end)
+    cand = _time_kernel(namespace, inp, flush, start, end)
+    base_med = statistics.median(base) if base else 0.0
+    cand_med = statistics.median(cand) if cand else 0.0
+    res.base_ms = base_med
+    res.cand_ms = cand_med
+    res.ratio = (base_med / cand_med) if (base_med > 0 and cand_med > 0) else 0.0
+    return res
+
+
+# --------------------------------------------------------------------------------------
+# driver
+# --------------------------------------------------------------------------------------
+def _group(name: str) -> str:
+    if name.startswith("fa3_dense"):
+        return "A) dense flash_attn_func"
+    if name.startswith("fa3_varlen"):
+        return "B) varlen flash_attn_varlen_func"
+    return "C) kvcache decode / split-KV"
+
+
+def _gm(xs):
+    xs = [x for x in xs if x and x > 0]
+    return math.exp(sum(math.log(x) for x in xs) / len(xs)) if xs else 0.0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--cand", default=os.path.join(_REPO_ROOT, "kernels", "fa3_hopper.cu"),
+                    help="path to the candidate .cu (default: kernels/fa3_hopper.cu)")
+    ap.add_argument("--gpu", type=int, default=int(os.environ.get("FA3_EVAL_GPU", "0")))
+    ap.add_argument("--configs", default=None, help="comma-separated subset of scenario names")
+    ap.add_argument("--no-perf", action="store_true", help="build + correctness only")
+    ap.add_argument("--namespace", default="_fa3bench_C", help="candidate torch op namespace")
+    args = ap.parse_args()
+
+    torch.cuda.set_device(args.gpu)
+    cfgs = C.get_configs("fa3test")
+    if args.configs:
+        want = {s.strip() for s in args.configs.split(",") if s.strip()}
+        cfgs = [c for c in cfgs if c.name in want]
+        if not cfgs:
+            print(f"no scenarios match {sorted(want)}")
+            return 1
+
+    work_dir = os.path.join(_REPO_ROOT, ".fa3_trials", args.namespace)
+    print(f"[build] {args.cand} -> ns={args.namespace}", flush=True)
+    t0 = time.time()
+    try:
+        build_candidate(args.cand, args.namespace, work_dir)
+    except Exception as e:
+        print(f"[build] FAILED: {e}")
+        return 1
+    print(f"[build] ok in {time.time() - t0:.1f}s", flush=True)
+
+    baseline = load_baseline()
+    if not baseline:
+        print("[warn] vLLM FA3 baseline (_vllm_fa3_C) not importable -> "
+              "fp32-ref-only correctness, perf skipped.", flush=True)
+        args.no_perf = True
+
+    print(f"[run] {len(cfgs)} scenarios on GPU {args.gpu}"
+          f"{' (vs FA3 + fp32 ref)' if baseline else ' (fp32 ref only)'}...", flush=True)
+    rows = []
+    for cfg in cfgs:
+        try:
+            r = check_correctness(cfg, args.namespace, baseline)
+        except Exception as e:
+            r = _Result(cfg.name)
+            r.note = f"verify error: {type(e).__name__}: {e}"[:200]
+        if r.correct and not args.no_perf:
+            try:
+                m = measure(cfg, args.namespace, args.gpu)
+                r.ratio, r.base_ms, r.cand_ms = m.ratio, m.base_ms, m.cand_ms
+            except Exception as e:
+                r.note = f"perf error: {type(e).__name__}: {e}"[:120]
+        rows.append(r)
+        st = "OK  " if r.correct else ("UNSUP" if r.unsup else "FAIL")
+        perf = f"{r.ratio:5.3f}x" if (r.ratio is not None) else "  -  "
+        extra = ""
+        if r.correct and r.base_ms:
+            extra = f"  (FA3 {r.base_ms*1e3:7.1f}us / ours {r.cand_ms*1e3:7.1f}us)"
+        elif r.note:
+            extra = "  " + r.note[:90]
+        print(f"  {st:5s} {cfg.name:32s} {perf:>7s}{extra}", flush=True)
+
+    n_correct = sum(1 for r in rows if r.correct)
+    n_wrong = sum(1 for r in rows if not r.correct and not r.unsup)
+    n_unsup = sum(1 for r in rows if r.unsup)
+    ratios = sorted(r.ratio for r in rows if r.correct and r.ratio)
+    print("\n" + "-" * 80)
+    print(f"correct: {n_correct}/{len(rows)}   unsupported: {n_unsup}   wrong: {n_wrong}")
+    if ratios:
+        print(f"perf over {len(ratios)} configs:  geomean={_gm(ratios):.3f}x  "
+              f"min={ratios[0]:.3f}x  median={ratios[len(ratios)//2]:.3f}x  max={ratios[-1]:.3f}x")
+        print(f"  >=0.95x: {sum(1 for x in ratios if x>=0.95)}   "
+              f"0.85-0.95x: {sum(1 for x in ratios if 0.85<=x<0.95)}   "
+              f"<0.85x: {sum(1 for x in ratios if x<0.85)}")
+    return 0 if n_wrong == 0 else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

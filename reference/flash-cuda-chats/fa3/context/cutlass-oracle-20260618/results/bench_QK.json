@@ -1,0 +1,37 @@
+{
+  "mode": "QK",
+  "gpu": 0,
+  "rows": [
+    {
+      "shape": "2048x16384x128",
+      "cutlass_ms": 0.135861,
+      "cutlass_tflops": 63.23,
+      "ptx_ms": 0.083836,
+      "ptx_tflops": 102.46,
+      "perf_ratio_ptx_over_cutlass": 1.6204,
+      "output_max_abs_diff": 0.0,
+      "ptx_correct_vs_ref": true
+    },
+    {
+      "shape": "2048x2048x128",
+      "cutlass_ms": 0.019678,
+      "cutlass_tflops": 54.57,
+      "ptx_ms": 0.012957,
+      "ptx_tflops": 82.87,
+      "perf_ratio_ptx_over_cutlass": 1.5186,
+      "output_max_abs_diff": 0.0,
+      "ptx_correct_vs_ref": true
+    },
+    {
+      "shape": "1024x1024x128",
+      "cutlass_ms": 0.008925,
+      "cutlass_tflops": 30.08,
+      "ptx_ms": 0.006676,
+      "ptx_tflops": 40.21,
+      "perf_ratio_ptx_over_cutlass": 1.3368,
+      "output_max_abs_diff": 0.0,
+      "ptx_correct_vs_ref": true
+    }
+  ],
+  "ts": 1781742694.492548
+}

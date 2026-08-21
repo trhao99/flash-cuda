@@ -1,0 +1,78 @@
+scenario,bar,phase,dtype,head_dim,status,ours_x,cudnn_x,fi_x,base_us,cand_us,cudnn_us,fi_us,err_ratio,note
+dense_c_d64_s1k,"Causal, d=64",prefill,bf16,64,OK,1.2464,1.3649,1.1556,227.02,182.14,166.34,196.45,1,
+dense_c_d64_s4k,"Causal, d=64",prefill,bf16,64,OK,0.9915,1.1342,0.9417,447.97,451.82,394.96,475.71,1,
+dense_c_d64_s8k,"Causal, d=64",prefill,bf16,64,OK,0.9205,1.1155,0.8868,759.38,824.98,680.77,856.34,1,
+dense_c_d128_s1k,"Causal, d=128",prefill,bf16,128,OK,1.2520,1.3900,1.0677,153.73,122.78,110.59,143.98,1,
+dense_c_d128_s4k,"Causal, d=128",prefill,bf16,128,OK,0.9942,1.1739,0.8913,297.92,299.65,253.78,334.26,1,
+dense_c_d128_s8k,"Causal, d=128",prefill,bf16,128,OK,0.9216,1.0886,0.8231,496.77,539.02,456.34,603.50,1,
+dense_c_d128_gqa8_s2k,"Causal, d=128",prefill,bf16,128,OK,1.1111,1.2158,0.9452,184.53,166.08,151.78,195.23,1,
+dense_c_d128_gqa8_s8k,"Causal, d=128",prefill,bf16,128,OK,0.9015,1.1051,0.8031,477.34,529.49,431.95,594.35,1,
+dense_c_d96_s2k,"Causal, d=128",prefill,bf16,96,OK,0.8543,1.2500,,183.44,214.72,146.75,,1,
+dense_c_d128_softcap50_s2k,"Causal, d=128",prefill,bf16,128,OK,1.9150,,,802.50,419.06,,,1.07,
+dense_c_d128_sink_s2k,"Causal, d=128",prefill,bf16,128,OK,1.0670,1.2283,0.8920,194.32,182.11,158.21,217.86,1,
+dense_c_d256_s2k,"Causal, d=256",prefill,bf16,256,UNSUP({ours}),,2.5958,3.1865,560.77,,216.03,175.98,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=256 hdv=256 paged=0 dtype=BFloat16"
+dense_c_d256_s8k,"Causal, d=256",prefill,bf16,256,UNSUP({ours}),,1.0559,1.4387,748.02,,708.43,519.94,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=256 hdv=256 paged=0 dtype=BFloat16"
+dense_c_d192_s2k,"Causal, d=256",prefill,bf16,192,"UNSUP({ours, FA4, FlashInfer})",,,,,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=192 hdv=192 paged=0 dtype=BFloat16"
+dense_c_d192_dv128_s2k,"Causal, d=256",prefill,bf16,192,OK,1.3171,1.5075,,161.84,122.88,107.36,,1,
+dense_nc_d128_s2k,Non-causal,prefill,bf16,128,OK,0.9305,1.1673,0.9445,271.74,292.03,232.80,287.71,1.072,
+dense_nc_d128_s8k,Non-causal,prefill,bf16,128,OK,0.8759,1.1031,0.9266,889.26,1015.25,806.16,959.74,1.347,
+dense_nc_d256_s8k,Non-causal,prefill,bf16,256,UNSUP({ours}),,0.7438,1.1489,1063.28,,1429.44,925.46,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=256 hdv=256 paged=0 dtype=BFloat16"
+dense_c_d64_fp8_s8k,FP8,prefill,fp8e4m3,64,"UNSUP({ours, cuDNN, FlashInfer})",,,,748.69,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=64 hdv=64 paged=0 dtype=Float8_e4m3fn"
+dense_c_d128_fp8_s4k,FP8,prefill,fp8e4m3,128,"UNSUP({ours, cuDNN, FlashInfer})",,,,308.98,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=128 hdv=128 paged=0 dtype=Float8_e4m3"
+dense_c_d128_fp8_s8k,FP8,prefill,fp8e4m3,128,"UNSUP({ours, cuDNN, FlashInfer})",,,,464.96,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=128 hdv=128 paged=0 dtype=Float8_e4m3"
+dense_c_d128_fp8_gqa_s4k,FP8,prefill,fp8e4m3,128,"UNSUP({ours, cuDNN, FlashInfer})",,,,286.06,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=128 hdv=128 paged=0 dtype=Float8_e4m3"
+dense_c_d256_fp8_s8k,FP8,prefill,fp8e4m3,256,"UNSUP({ours, FA4, cuDNN, FlashInfer})",,,,,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=256 hdv=256 paged=0 dtype=Float8_e4m3"
+dense_c_d128_fp8_scalar_s4k,FP8,prefill,fp8e4m3,128,"UNSUP({ours, cuDNN})",,,1.1390,374.74,,,328.99,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=128 hdv=128 paged=0 dtype=Float8_e4m3"
+dense_c_d128_fp8_scalar_gqa_s4k,FP8,prefill,fp8e4m3,128,"UNSUP({ours, cuDNN})",,,1.1118,366.83,,,329.94,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=128 hdv=128 paged=0 dtype=Float8_e4m3"
+dense_c_d64_fp8_scalar_s8k,FP8,prefill,fp8e4m3,64,"UNSUP({ours, cuDNN})",,,1.0513,826.53,,,786.18,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=64 hdv=64 paged=0 dtype=Float8_e4m3fn"
+dense_c_d128_swa256_s4k,Sliding window,prefill,bf16,128,OK,1.0525,1.1420,1.0079,128.90,122.46,112.86,127.89,1,
+dense_c_d128_swa4k_s4k,Sliding window,prefill,bf16,128,OK,0.9728,0.9197,0.8531,266.18,273.63,289.42,312.00,1,
+varlen_c_d128_mix,Variable-length,prefill,bf16,128,OK,1.5878,1.1896,0.9800,54.11,34.08,45.49,55.22,1.311,
+varlen_c_d64_mix,Variable-length,prefill,bf16,64,OK,1.7738,1.1812,0.9839,51.94,29.28,43.97,52.78,1.01,
+varlen_c_d128_mqa_mix,Variable-length,prefill,bf16,128,OK,1.6174,1.1967,0.9892,54.11,33.46,45.22,54.70,1.457,
+varlen_c_d128_realmix,Variable-length,prefill,bf16,128,OK,1.0196,0.8707,0.8750,214.88,210.75,246.78,245.58,1,
+llama8b_dec_b16_s512,Decode ≤4k,decode,bf16,128,OK,1.5648,1.8101,1.1223,55.06,35.18,30.42,49.06,0.9312,
+llama8b_dec_b32_s1k,Decode ≤4k,decode,bf16,128,OK,1.0356,1.4539,1.0701,77.18,74.53,53.09,72.13,0.7331,
+llama8b_dec_b16_s4k,Decode ≤4k,decode,bf16,128,OK,1.2020,1.3328,1.0639,98.05,81.57,73.57,92.16,0.8836,
+llama8b_dec_b64_s4k,Decode ≤4k,decode,bf16,128,OK,0.9458,1.1781,1.1249,230.94,244.18,196.03,205.30,0.9481,
+llama8b_dec_b16_s4k_p16,Decode ≤4k,decode,bf16,128,OK,1.0906,1.3564,1.0851,100.16,91.84,73.84,92.30,0.8836,
+llama8b_dec_b16_s4k_p128,Decode ≤4k,decode,bf16,128,OK,1.1905,1.3195,1.0372,96.48,81.04,73.12,93.02,0.8836,
+qwen3_dec_b16_s4k,Decode ≤4k,decode,bf16,128,OK,,,,,,,,0.0003324, (no-baseline)
+qwen3_dec_b64_s4k,Decode ≤4k,decode,bf16,128,OK,1.0237,1.1804,1.1152,145.10,141.74,122.93,130.11,0.8204,
+llama70b_dec_b16_s4k,Decode ≤4k,decode,bf16,128,OK,1.1781,1.3452,1.0716,98.94,83.98,73.55,92.34,0.5376,
+mistral_dec_b16_s4k,Decode ≤4k,decode,bf16,128,OK,1.2220,1.3454,1.0720,100.03,81.86,74.35,93.31,0.8836,
+gemma2_dec_b16_s4k,Decode ≤4k,decode,bf16,256,"UNSUP({ours, FA4, cuDNN, FlashInfer})",,,,,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=256 hdv=256 paged=1 dtype=BFloat16"
+llama8b_dec_b16_s16k,Decode >4k,decode,bf16,128,OK,1.0452,1.1999,1.0934,220.78,211.23,184.00,201.92,1.006,
+llama8b_dec_b64_s16k,Decode >4k,decode,bf16,128,OK,0.9717,1.3153,1.3001,844.53,869.14,642.08,649.60,1.051,
+llama8b_dec_b16_s32k,Decode >4k,decode,bf16,128,OK,0.9610,1.2175,1.1576,401.26,417.57,329.57,346.64,1.076,
+qwen3_dec_b16_s32k,Decode >4k,decode,bf16,128,OK,,,,,,,,0.0001406, (no-baseline)
+llama70b_dec_b4_s128k,Decode >4k,decode,bf16,128,OK,,,,,,,,6.058e-05, (no-baseline)
+mistral_dec_b16_s16k,Decode >4k,decode,bf16,128,OK,1.1768,1.3632,1.0770,101.38,86.14,74.37,94.13,0.991,
+llama8b_pf_q512,Prefill,prefill,bf16,128,OK,1.5771,1.5198,1.0496,59.55,37.76,39.18,56.74,1,
+llama8b_pf_q2k,Prefill,prefill,bf16,128,OK,1.0880,1.3757,0.8674,85.30,78.40,62.00,98.34,1,
+llama8b_pf_q8k,Prefill,prefill,bf16,128,OK,0.9728,1.1656,0.8822,505.90,520.03,434.03,573.49,1,
+llama8b_pf_q2k_p16,Prefill,prefill,bf16,128,OK,1.0729,1.3628,0.8728,86.43,80.56,63.42,99.02,1,
+qwen3_pf_q4k,Prefill,prefill,bf16,128,OK,1.0625,1.2322,0.8688,166.24,156.46,134.91,191.34,1,
+llama70b_pf_q8k,Prefill,prefill,bf16,128,OK,0.9563,1.0601,0.8910,989.71,1034.94,933.58,1110.77,1,
+mistral_pf_q4k,Prefill,prefill,bf16,128,OK,1.0702,0.9251,0.8809,169.26,158.16,182.96,192.14,1,
+gemma2_pf_q4k,Prefill,prefill,bf16,256,"UNSUP({ours, FA4, cuDNN, FlashInfer})",,,,,,,,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=256 hdv=256 paged=1 dtype=BFloat16"
+llama8b_pf_ragged,Prefill,prefill,bf16,128,OK,1.0217,0.8555,0.8761,215.49,210.91,251.89,245.95,1,
+llama8b_ext_q512_k16k,Chunked prefill,prefill,bf16,128,OK,,,,,,,,0.0003002, (no-baseline)
+llama8b_ext_q1k_k64k,Chunked prefill,prefill,bf16,128,OK,0.9668,1.0955,1.0438,1010.18,1044.91,922.08,967.74,0.9528,
+qwen3_ext_q512_k32k,Chunked prefill,prefill,bf16,128,OK,,,,,,,,0.0001687, (no-baseline)
+llama70b_ext_q1k_k128k,Chunked prefill,prefill,bf16,128,OK,0.9435,1.0703,1.0738,4019.86,4260.40,3755.74,3743.42,0.9873,
+llama8b_spec_q2_b16_s1k,Speculative,decode,bf16,128,OK,1.1924,0.3528,1.0729,62.88,52.74,178.22,58.61,0.9856,
+llama8b_spec_q4_b32_s4k,Speculative,decode,bf16,128,OK,0.9279,0.1437,1.0883,145.07,156.35,1009.78,133.30,0.9027,
+llama8b_spec_q8_b16_s4k,Speculative,decode,bf16,128,OK,1.0037,0.1700,1.0285,99.82,99.46,587.09,97.06,0.8848,
+qwen3_spec_q4_b16_s4k,Speculative,decode,bf16,128,OK,,,,,,,,0.0003776, (no-baseline)
+mixed_2pf2k_8dec1k,Mixed batch,prefill,bf16,128,OK,0.9393,0.9261,0.8973,141.38,150.51,152.66,157.55,1,
+mixed_1pf8k_64dec4k,Mixed batch,prefill,bf16,128,OK,0.7764,0.5598,0.4889,789.60,1017.04,1410.58,1615.18,1,
+mixed_2pf2k_8dec16k,Mixed batch,prefill,bf16,128,OK,1.1674,0.5221,0.6549,351.15,300.80,672.61,536.21,1,
+llama8b_dec_bf16q_fp8kv_b16_s1k,FP8 KV,decode,bf16q_fp8kv,128,OK,4.6903,6.2026,,224.38,47.84,36.18,,1,
+llama8b_dec_bf16q_fp8kv_b32_s4k,FP8 KV,decode,bf16q_fp8kv,128,OK,8.5701,9.7705,,1171.84,136.74,119.94,,0.908,
+llama8b_dec_bf16q_fp8kv_b16_s16k,FP8 KV,decode,bf16q_fp8kv,128,OK,9.9123,11.3517,,2088.72,210.72,184.00,,0.7921,
+llama8b_pf_bf16q_fp8kv_q2k,FP8 KV,prefill,bf16q_fp8kv,128,OK,1.6974,2.1155,,132.72,78.19,62.74,,1,
+llama8b_dec_bf16q_fp8kv_scalar_b16_s1k,FP8 KV,decode,bf16q_fp8kv,128,OK,4.5492,2.9621,2.4181,228.77,50.29,77.23,94.61,1.044,
+llama8b_dec_bf16q_fp8kv_scalar_b32_s4k,FP8 KV,decode,bf16q_fp8kv,128,OK,8.2985,7.2777,7.2284,1161.52,139.97,159.60,160.69,1.004,
+llama8b_dec_fp8_scalar_b16_s4k,FP8 KV,decode,fp8e4m3,128,"UNSUP({ours, cuDNN})",,,1.3929,173.57,,,124.61,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=128 hdv=128 paged=1 dtype=Float8_e4m3"
+llama8b_pf_fp8_scalar_q2k,FP8 KV,prefill,fp8e4m3,128,"UNSUP({ours, cuDNN})",,,1.1858,170.29,,,143.60,,"candidate fwd raised: RuntimeError: fa4_blackwell: unsupported config (this build: bf16/fp16, hq%hkv==0, (hd,hdv) in {(<=128,==hd),(192,128),(64,64)}, no fp8). hd=128 hdv=128 paged=1 dtype=Float8_e4m3"

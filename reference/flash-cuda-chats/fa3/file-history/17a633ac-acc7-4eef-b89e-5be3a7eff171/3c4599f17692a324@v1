@@ -1,0 +1,5 @@
+"""In-repo, self-contained build / correctness / performance harness for kernels/fa3_fwd.cu.
+
+Replaces the external agent harness: `bench.config` (scenario matrix + constants),
+`bench.shapes` (input + fp32-reference construction), and `bench.eval` (build + A/B vs FA3).
+"""

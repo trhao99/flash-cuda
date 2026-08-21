@@ -1,0 +1,546 @@
+[L3] Understand fa3agent configs/shapes: which prefill kernels run in full configs
+[L3] Identify worst-performing prefill kernel(s) from run_20260616_011948 reports
+[L3] Understand FA3/vllm-flash-attention reference + CUTLASS usage
+[L3] Wait for GPUs to be free, then trace which CUTLASS functions/templates FA3 uses (shapes/dtypes) for chosen kernel
+[L3] Save the traced CUTLASS function list to a persistent file
+[L3] Build component to inspect CUTLASS source / generated PTX
+[L3] Write .cu implementing each CUTLASS function in CUDA/PTX only
+[L3] Iterate to match CUTLASS performance with aligned output
+[L17] Understand fa3agent configs/shapes + identify worst prefill kernel (prefill_hd128_bf16, 0.24x)
+[L17] Trace CUTLASS templates/functions FA3 uses for hd128 bf16 prefill (QK/PV wgmma + TMA, shapes/dtypes)
+[L17] Save the traced CUTLASS function list to a persistent file (TRACE doc)
+[L17] Build standalone CUTLASS oracle GEMM (QK shape: TN bf16->f32) + compile + run (de-risk toolchain)
+[L17] Build PTX/SASS inspection component (dump + grep wgmma/TMA/mbarrier from cutlass GEMM)
+[L17] Confirm trace by dumping FA3 hdim128 bf16 TU PTX (authoritative wgmma/TMA forms)
+[L17] Write pure-CUDA/PTX GEMM (QK) matching cutlass output, benchmark vs cutlass
+[L17] Add PV GEMM (RS operand) oracle + pure-CUDA version
+[L17] Iterate pure-CUDA GEMM perf to match CUTLASS; wire component into fa3agent
+[L46] Identify worst prefill kernel (prefill_hd128_bf16, 0.24x) + config
+[L46] Trace CUTLASS templates FA3 uses (QK/PV wgmma + TMA) — confirmed via cutlass GEMM PTX + authoritative FA3 TU PTX
+[L46] Save trace list to TRACE_prefill_hd128_bf16.md
+[L46] CUTLASS oracle GEMM (QK) compiles + runs (54.9 TFLOPS)
+[L46] PTX/SASS inspection component (extracts wgmma/TMA/mbarrier sequence)
+[L46] pure-CUDA/PTX QK GEMM v1: bit-identical output to cutlass, 29.2 TFLOPS (~53%)
+[L46] Write reproducible driver/orchestrator (build+bench+compare) + record results
+[L46] Perf iterate v2: 2 warpgroups (128x128 tile) + cp.async pipeline to close gap to cutlass
+[L46] Wire cutlass_oracle component into fa3agent (replace old sass/cutlass_oracle.py)
+[L63] CUTLASS oracle GEMM (QK) compiles + runs
+[L63] Reproducible driver/orchestrator (build+bench+compare) + recorded results
+[L63] pure-CUDA/PTX QK GEMM: bit-identical output to cutlass, 0.82-0.96x cutlass perf
+[L63] Perf iterate v3: TMA + mbarrier pipeline + warp-specialization to reach ~1.0x at small shapes
+[L82] Reconfirm baseline numbers + verify GPU free + check ncu availability
+[L82] Profile ptx_gemm vs cutlass (ncu) to pinpoint the gap (epilogue store / load latency / occupancy / wave-quant)
+[L82] Improve epilogue: smem-staged vectorized 128-bit global stores
+[L82] Add cp.async multistage pipeline for K loads (overlap load with wgmma)
+[L82] Persistent kernel + tile scheduler to kill wave quantization at small shapes
+[L82] Reach >=1.0x cutlass across all shapes with bit-aligned output; record results
+[L107] Reconfirm baseline + GPU free + ncu available
+[L107] Profile ptx vs cutlass (ncu): identified store-bound, cutlass L2-73% ceiling ~68 TFLOPS
+[L107] Vectorized float2 register->global epilogue (big win at large shapes)
+[L107] cp.async multistage load: tried, REGRESSED (no overlap / occupancy), reverted to float4 LDG->STS
+[L107] Persistent kernel + linear tile scheduler (big win at small shapes)
+[L107] Reach >=1.0x cutlass: achieved 1.50-1.65x across all shapes incl. real chunk16k QK, bit-identical output
+[L107] Document final results + ncu evidence + cutlass ceiling sweep + store-bound caveat in TRACE doc
+[L107] PV GEMM (RS operand) oracle + pure-CUDA version (next)
+[L107] Wire cutlass_oracle into fa3agent (replace old sass/cutlass_oracle.py) (next)
+[L118] Write FA3_REPLICATION_PLAN.md (steps + cutlass->raw mapping + exactness notes)
+[L118] Get exact wgmma RS A-operand register fragment layout (PTX docs + cutlass RS atom)
+[L118] PV GEMM: verify cutlass reference (NN) builds/runs; restructure oracle.py + ptx_gemm.cu for QK/PV modes
+[L118] Implement pure-PTX PV GEMM (RS operand, V^T in smem, ldmatrix or transposed load), validate nbad=0
+[L118] Benchmark PV ptx vs cutlass; record results in TRACE doc
+[L130] Get exact wgmma RS A-operand register fragment layout
+[L130] PV: restructure oracle.py + ptx_gemm.cu for QK/PV modes; cutlass PV reference builds/runs
+[L130] Implement pure-PTX PV GEMM (RS, V^T smem), validate nbad=0 / bit-identical
+[L130] Benchmark PV ptx vs cutlass (1.00-1.06x, out|delta|=0); recorded in TRACE doc
+[L130] TMA + mbarrier pipeline; warp-specialization; softmax/mask/LSE/epilogue numerics
+[L130] Assemble fused forward (one config) + A/B vs _vllm_fa3_C.fwd (correctness + latency)
+[L130] Wire cutlass_oracle into fa3agent (replace old sass/cutlass_oracle.py)
+[L135] GEMMs (QK SS + PV RS) vs CUTLASS — DONE (bit-identical, >=1.0x)
+[L135] Memory movement: TMA loader (cuTensorMapEncodeTiled + cp.async.bulk.tensor) + mbarrier; validate correctness + bandwidth vs cp.async
+[L135] Synchronization: mbarrier producer/consumer 2-stage pipeline (TMA load <-> wgmma); validate vs non-pipelined
+[L135] Math/numerics: online softmax (ex2.approx.f32) + mask + fp32->bf16 (cvt.rn) + LSE; validate vs fp32 ref
+[L135] Epilogue: O normalize + stmatrix/STG store + softmax_lse; validate vs fp32 ref
+[L135] Assemble fused forward (prefill_hd128_bf16) wiring all components; no CUTLASS
+[L135] A/B the fused kernel vs _vllm_fa3_C.fwd: correctness + latency on selected configs
+[L157] Memory movement: TMA loader validated (bit-exact, BW>=cp.async)
+[L157] Math/numerics: online softmax validated vs ref (O/LSE ~1e-7)
+[L157] Synchronization: mbarrier primitives validated; pipeline folded into fused mainloop
+[L157] Assemble fused forward (prefill_hd128_bf16 causal) wiring QK+softmax+PV+epilogue; no CUTLASS
+[L190] Synchronization: mbarrier primitives validated; cp.async double-buffer pipeline (-DPIPE) built & correct (+6%)
+[L190] Epilogue (O normalize + LSE + bf16 store) validated in fused kernel vs fp32 ref
+[L190] Fused forward (hd128 bf16 causal+noncausal) wired from all components; correct, NO CUTLASS
+[L190] A/B vs _vllm_fa3_C.fwd: correct (O|d|=2.7e-3), ~0.2x FA3; NCU root-caused (occupancy + softmax serialization)
+[L190] Perf to ~1.0x FA3: warp-specialized 2-consumer ping-pong (overlap softmax/MMA) + GEMM0||GEMM1 + TMA producer
+[L242] Perf to ~1.0x FA3: intra-WG software pipeline (softmax‖PV) + cp.async-V trans-b DONE → 0.2x→0.39x. Remaining: producer WG + ping-pong toward 1.0x
+[L308] Warp-specialized rewrite: producer WG (cp.async+mbarrier) + 2-consumer named-barrier ping-pong (-DWS) + intra-WG PV-lag overlap (-DWSO). 0.2x->0.39x->0.5x FA3. WSO is canonical fused_attn binary. Correct (O|d|=2.7e-3).
+[L308] Toward 1.0x: TMA+128B-swizzle K/V loads (cuts producer instr + L2 62.7%), NCU-profile FA3 itself for scheduling gap, 2-CTA cluster (M=256).
+[L338] Derive exact 128B-swizzle smem layout + wgmma descriptor (swizzle bits/LBO/SBO/base-offset) from CUTLASS source
+[L338] Standalone test: TMA-load [128,128] bf16 K tile w/ CU_TENSOR_MAP_SWIZZLE_128B; round-trip + QK wgmma vs validated no-swizzle GEMM (bit-exact)
+[L338] Same for V (MN-major / trans-b path) under TMA+swizzle
+[L338] Integrate TMA K/V into a new -DWST kernel (single producer warp issues TMA, mbarrier complete-tx), keep WSO as fallback
+[L338] Correctness (O|d| vs fp32 ref) + NCU (expect long-scoreboard down, tensor up) + A/B vs FA3
+[L338] [Second pass] persistent scheduler: grid=#SMs, cross-tile ring carry + Q handshake
+[L348] Derive exact 128B-swizzle smem layout + wgmma descriptor (DONE: swz(o)=o^(((o>>7)&7)<<4); K-desc LBO16/SBO1024/lt1; MN-desc LBO1024/SBO2048/lt1)
+[L348] Standalone test: store Q/K into SW128 smem + B128 desc wgmma vs no-swizzle/CPU ref (bit-exact); then TMA-load path
+[L379] Derive 128B-swizzle smem layout + wgmma descriptors (K & MN) from cute
+[L379] K-major TMA+swizzle+wgmma bit-exact vs fp32 ref (tma_swz_test.cu pathB)
+[L379] Extract CUTLASS V (MN-major SW128) make_tma_copy box config via host probe
+[L379] V (MN-major) TMA+swizzle+PV wgmma bit-exact vs fp32 ref
+[L379] Integrate TMA K/V into -DWST kernel (single-warp producer, mbarrier complete-tx), keep WSO fallback
+[L379] Correctness (O|d| vs fp32) + NCU (long-scoreboard down, tensor up) + A/B vs FA3
+[L379] [2nd pass] persistent scheduler: grid=#SMs, cross-tile ring carry + Q handshake
+[L379] Wire cutlass_oracle into fa3agent (replace sass/cutlass_oracle.py)
+[L392] Trace FA3 load() (TMA issue order, mbarrier complete-tx, K/V box) + scheduler get_next_work
+[L392] WST correctness (O|d| vs fp32) + NCU (long-scoreboard down, tensor up) + A/B vs FA3
+[L392] Persistent scheduler: grid=#SMs, cross-tile ring carry + Q handshake (trace FA3 TileScheduler)
+[L392] Persistent correctness + NCU + A/B vs FA3
+[L430] WST correctness + A/B vs FA3 (DONE: 0.71-0.76x, correct). NCU optional.
+[L460] Persistent scheduler: grid=#SMs, cross-tile ring carry + Q handshake (StaticPersistentTileScheduler)
+[L460] Persistent correctness + NCU + A/B vs FA3 (DONE: neutral causal/+3% noncausal; NCU found ping-pong is the real limit)
+[L460] Drop inter-WG ping-pong (NCU barrier-bound): +6-7% universal -> ~0.77x FA3
+[L469] Re-NCU WST+NOPP steady-state: find dominant stall after ping-pong removal
+[L469] Tighten QK/PV wgmma issue schedule: keep 2 groups in flight, kill C7520 serialization, fewer fences/waits
+[L469] Occupancy levers: 2-stage K/V (free smem), reduce register pressure toward 2 CTA/SM
+[L469] Hide softmax (MUFU.EX2/FFMA) fully behind PV; reduce consumer non-tensor work
+[L469] A/B vs FA3 each iteration; reach 1.0x parity (currently ~0.77x)
+[L816] Re-NCU steady-state: found barrier stall dominant from wgmma serialization (DEPBAR=32)
+[L816] Root-cause + fix wgmma serialization: SEQB (sequential async batches) -> DEPBAR 32->2
+[L816] Re-add inter-WG ping-pong on async SEQB (softmax overlaps peer GEMM)
+[L816] Test persistent scheduler (WSTP+SEQB): slower, not adopted
+[L816] Attempt intra-WG deferred overlap (~10 ways): blocked by ptxas register-pressure serialization
+[L816] Final A/B vs FA3: 0.77x -> ~0.88x median (0.94x min), bit-exact
+[L816] Document breakthrough + ceiling in TRACE doc (section 18)
+[L904] Read FA3 tile scheduler source (dynamic/persistent work distribution)
+[L904] Read FA3 persistent kernel loop + prologue/epilogue across-tile pipelining
+[L904] Decide if scheduler is the gap: causal vs non-causal A/B + NCU breakdown
+[L904] Implement the missing piece (scheduler or cross-tile pipelining)
+[L904] A/B vs FA3 + update TRACE doc
+[L911] Decide if scheduler is the gap: causal vs non-causal A/B (DONE: ratio identical ~0.90x => NOT scheduler)
+[L911] Deep NCU pipe-util comparison (tensor/FMA/MUFU/LSU/issue) mine vs FA3 to find steady-state gap
+[L911] Implement the real fix (steady-state overlap / softmax / wgmma shape)
+[L949] Read FA3 tile scheduler source
+[L949] Read FA3 persistent kernel loop
+[L949] Decide if scheduler is the gap (NO: causal==noncausal ratio)
+[L949] Deep NCU pipe-util comparison -> found exposed softmax + exp2f guards
+[L949] ex2.approx.ftz softmax + drop redundant zero/rescale + NOPP -> 0.94-0.96x
+[L949] Re-profile NCU to find remaining ~5% gap
+[L965] Decide if scheduler is the gap (NO: causal==noncausal ratio; static persistent hurts causal)
+[L965] ex2.approx.ftz softmax + NOPP + rescale placement -> matches FA3 FMA/issue
+[L965] Re-profile NCU: FMA 24->16.5%, issue 49->39%, tensor 69->77%
+[L965] A/B vs FA3 (0.88-0.91x -> 0.93-0.96x) + update TRACE doc
+[L992] Check FA3 tile_size second fn: kStages + Q_in_regs for hd128
+[L992] Read FA3 mainloop mma() exact gemm/sync/operand-source structure
+[L992] Read my qk_gemm/pv_gemm operand sourcing (SS vs LDS) in fused_attn.cu
+[L992] Map my 172 LDS to source — is long_scoreboard real & fixable?
+[L992] Compare my hot-loop SASS vs FA3 hot-loop SASS
+[L992] Confirm/refute fill-drain vs operand-latency hypothesis with evidence
+[L1013] FA3 hd128 MmaQK_is_RS=false (Q/K both SS) — Q-in-regs lever refuted
+[L1013] Read FA3 mma(): softmax overlaps only PV (warpgroup_wait<1>), same as mine
+[L1013] My QK/PV are SS via descriptor, separate commit groups — no operand LDS
+[L1013] No spills (168 regs, 0 spill); long_scoreboard not the cause
+[L1013] VERIFIED cause = exposed softmax (GEMM ceiling > FA3 full, both causal+nc); fill/drain & ping-pong refuted
+[L1013] Implement double-buffered score tile: overlap softmax(nb) with QK(nb+1)+PV(nb-1) (16 wgmma not 8)
+[L1013] Measure dbuf vs FA3 + check ptxas spills/register budget
+[L1035] VERIFIED cause = exposed softmax (GEMM ceiling > FA3 full for ALL configs); fill/drain, kBlockN, Q-in-regs, spills all refuted
+[L1035] Double-buffer scores implemented & bit-exact, but register-bound (C7511) — needs ~32 regs freed
+[L1035] Confirmed DBUF register-bound (nc 490 vs 576); ping-pong doesn't reproduce FA3 alternation
+[L1035] Path forward: move P to smem (SS PV) to fit double-buffer, OR debug ping-pong barrier
+[L1098] Persistent scheduler (WSTP) — measured win, esp causal-2048 0.88→0.96
+[L1098] Tree-reduced softmax (4-way max/sum) — +1%, bit-exact
+[L1098] Ping-pong ruled out: ablation + offset sweep both show zero overlap
+[L1098] PROVEN: P-in-smem (P≈4 regs) clears DBUF C7511 even at cap 232
+[L1098] Implement P-in-smem (no-swizzle gmma_k_off layout) + SS-PV, test in single-buffer first
+[L1098] Decouple K/V smem rings (K=2,V=2/3) to fit P-in-smem under 228KB
+[L1098] Wire P-in-smem into DBUF, verify bit-exact + measure vs FA3
+[L1171] Implement P-in-smem (gmma_k_off SS-PV) + single-buffer test
+[L1171] Decouple K(2)/V(3) smem rings to fit P-in-smem under 228KB
+[L1171] Wire P-in-smem into DBUF (fused_attn_fwd_wst_dbp), verify bit-exact + measure
+[L1171] VERDICT: DBUF+PSMEM bit-exact but ~28% regression (C7511→C7515 serialization); dead end, documented in TRACE §24
+[L1173] Trace FA3 warp_scheduler_barrier_sync/arrive exact placement + barrier IDs/counts in mainloop_fwd_sm90_tma_gmma_ws.hpp
+[L1173] Read CUTLASS NamedBarrier scheduler setup (which WG arrives/syncs, kickoff, MmaWG roles)
+[L1173] Diff FA3's alternation against our NOPP/ping-pong path; pinpoint the lockstep-collapse difference
+[L1173] Implement the fix so the 2 consumer WGs genuinely alternate (half-period offset persists)
+[L1173] Verify bit-exact + measure vs production and FA3
+[L1226] NCU our PP kernel (causal+noncausal) — does ping-pong actually engage (barrier stall, tensor util)?
+[L1226] Verify whether warps_active gap is a producer-early-return artifact (check FA3 producer residency vs ours)
+[L1226] Source-level NCU: locate exactly which instructions cause our long-scoreboard stalls (0.80 vs 0.38)
+[L1226] Compare FA3 vs ours SASS/PTX of the scheduler-barrier region + mainloop body
+[L1226] Isolate wave-quantization: even-wave vs bad-tail grids, mine vs FA3
+[L1226] Report irrefutable findings + concrete plan (no code changes until then)
+[L1257] NCU our PP kernel — ping-pong does NOT engage (barrier 1.15 vs FA3 2.24). DONE
+[L1257] warps_active 13.8 vs 18.7 is a producer-early-return artifact (127/128 producer threads exit). DONE
+[L1257] long-scoreboard / fence: per-iter MEMBAR is from redundant proxy fence; removing it is bit-exact but SLOWER (beneficial, not the gap). DONE
+[L1257] FA3 vs ours mainloop SASS: byte-identical BAR.SYNC→16 HGMMA→BAR.ARV→DEPBAR; difference is dynamic not static. DONE
+[L1257] Linchpin: our GEMM-only ceiling (0.241) BEATS FA3 full (0.269); gap = exposed softmax ~16%. DONE
+[L1257] Report irrefutable findings + concrete plan
+[L1340] Read kept kernels (wst, wstp) fully; map helper usage
+[L1340] Remove KVSPLIT (today's additions) from wst + main + smem
+[L1340] Collapse wst kernel to single NOPP+CUTE path (remove SEQB/DBUF/PSMEM/BLK/PP/DIAG_ST0)
+[L1340] Collapse wstp kernel to NOPP+CUTE (remove SEQB/PP)
+[L1340] Remove superseded kernels: fused_attn_fwd, _pipe, _ovl, _ws, _ws_ovl, _wst_dbp
+[L1340] Remove orphaned helpers + diagnostic flags (ABLATE_*, VTRANS, NOFENCE, DIAG_*, softmax_stats2, blk/ss helpers)
+[L1340] Simplify main() dispatch to wst (default) + wstp
+[L1340] Build clean; verify bit-exact correctness + perf unchanged vs current
+[L1390] Collapse wst kernel to single NOPP+CUTE path
+[L1390] Collapse wstp kernel to NOPP+CUTE
+[L1390] Simplify main() dispatch + header doc to wst (default) + wstp
+[L1473] Enumerate the full fa3agent config surface (head dims, dtypes, causal, paged, GQA, decode/prefill, splits, softcap, sliding window, varlen)
+[L1473] Map current fused_attn.cu capabilities vs targets; identify hard-coded assumptions
+[L1473] Build a general correctness+perf harness in fa3-cuda that drives all config types vs FA3
+[L1473] Define staged generalization plan (prefill first, then decode) and priorities
+[L1473] Generalize prefill: head dims, non-causal, GQA, varlen — reach parity
+[L1473] Add decode path (q_len=1, paged KV, split-KV) — reach parity
+[L1473] Cover fp8, softcap, sliding window as needed for configs
+[L1503] Enumerate fa3agent full config surface (26 configs) + measurement contract
+[L1503] Map current capabilities vs targets; identify hard-coded assumptions
+[L1503] Wire fa3-cuda general op into fa3agent.trial; establish baseline (done: 26/26 correct, geomean 0.009x)
+[L1503] Record FA3-grounded staged generalization plan in repo docs
+[L1503] Prefill hd128: cp.async gather→swizzle-store loaders for packed-Q and paged/contiguous K/V (validate layout reproduces TMA)
+[L1503] Prefill hd128 bf16 kernel: reuse consumer mainloop + varlen causal align + pack-GQA scatter epilogue; wire dispatch
+[L1503] Validate prefill hd128 on dev_prefill_paged, noncausal, chunk16k, mixed; measure ratio vs FA3
+[L1503] Generalize prefill to head dims 64/96/192/256 (+ head_dim_v 192→128)
+[L1503] fp8 prefill (e4m3 wgmma + descale folding)
+[L1503] Decode path: coalesced paged streaming, GQA, split-KV + combine kernel, big-batch
+[L1503] softcap, sliding window, block_size 32, longctx, spec(q_len=4)
+[L1551] Prefill hd128: cp.async gather->swizzle-store loaders (FIXED swizzle formula: col bits3-5 ^= (row&7); verified byte-exact vs TMA)
+[L1551] Prefill hd128 bf16 kernel: consumer mainloop + varlen causal + pack-GQA scatter epilogue; wire dispatch
+[L1551] Validate prefill hd128 (noncausal/chunk16k/mixed): 3/3 correct; ratios 1.003/0.607/0.644, geomean 0.732
+[L1551] Close prefill hd128 perf gap on large/paged ctx (chunk16k 0.61, mixed 0.64): kill register spill (33 LDL/STL), improve loader (TMA for contig, better cp.async)
+[L1551] Generalize prefill to head dims 64/96/192/256 (+ head_dim_v 192->128)
+[L1600] Prefill hd128 perf: pipelined non-blocking cp.async producer + async-proxy fences (done). NCU: producer cp.async-issue-bound; ping-pong didn't help. Remaining gap (chunk16k 0.62) needs fewer load-instrs/row -> TMA-paged loader (next).
+[L1600] Prefill hd128: TMA-paged loader (per-page [16,128] cp.async.bulk.tensor composed into 128-row swizzle) to fix producer cp.async-issue bottleneck on large paged ctx (chunk16k/mixed)
+[L1600] Generalize prefill fast path to head dims 64/96/192/256 (+ head_dim_v 192->128): parametrize swizzle box count, tile sizes, wgmma N/K, accumulator sizes
+[L1600] Decode fast path: coalesced paged streaming, GQA, split-KV + combine kernel, big-batch
+[L1641] Prefill hd128 TMA-paged loader (per-page [block_size,64] cp.async.bulk.tensor boxes composed into 128-row swizzle). DONE: validated byte-exact (tma_probe16), correct 3/3, ratios noncausal 1.125 / chunk16k 0.787 / mixed 0.824, geomean 0.749->0.900.
+[L1663] Generalize prefill fast path to head dims. DONE hd64 (ratio 1.46) + hd128 (1.12/0.78/0.82, ~1% n64-seg PV cost). Kernel now templated <HD,HDV,USE_TMA>; QK generic k-steps, PV split into HDV/64 n64 boxes. hd96(pad)/hd192/hd256 need stage/tile retune (smem cap) -> deferred to pf-bighd.
+[L1663] Prefill hd96 (pad-to-128 swizzle), hd192/hd256 (reduce stages or CTA_N to fit 227KB smem; hd256 acc_o[128] register pressure). Currently on scalar fallback.
+[L1663] Decode fast path: coalesced paged streaming, GQA, split-KV + combine kernel, big-batch (largest lever: ~15 configs on scalar fallback)
+[L1701] Commit+push TMA-paged loader + head-dim generalization
+[L1701] Warp flash-decode kernel + combine (correct, all dims/dtypes/softcap/swa)
+[L1701] Add split-KV to prefill_kernel (local ring counters, abs key offsets, partial-to-scratch epilogue)
+[L1701] Route bf16 hd{64,128} no-softcap/no-swa decode to prefill+split; warp kernel for rest
+[L1701] Validate correctness + perf on decode configs vs FA3
+[L1701] Extend fast decode coverage (fp16/fp8/softcap/swa) as needed
+[L1701] Commit + push decode fast path
+[L1755] Route bf16 hd{64,128} (+softcap/swa) decode to prefill+split; warp kernel for rest
+[L1755] Validate correctness + perf: decode hd128 geomean 0.088 -> 0.79, prefill intact
+[L1755] Extend fast decode coverage (fp16/fp8/big head dims) - next
+[L1777] Speed up warp decode (prefetch pipeline + finer splits): 7 configs ~2x
+[L1777] Commit + push warp decode speedup + STAGES scaffold
+[L1777] Prefill+decode hd96/192/256 on wgmma path (CTA_N=64 templating) - biggest remaining drag
+[L1777] fp8/fp16 fast path (element-type templated prefill_kernel)
+[L1797] Template prefill_kernel + wgmma/gather/pack helpers on element type T (bf16/half)
+[L1797] Route fp16 prefill + fp16 decode-fast (launch_decode_split<half>) in mha_fwd
+[L1797] Validate fp16 correctness + perf (decode_hd128_fp16_gqa)
+[L1797] fp8 e4m3 smem layout (1-byte 128B swizzle) + gather + TMA map
+[L1797] fp8 wgmma m64nNk32 e4m3 QK/PV + descale folding (output bf16)
+[L1797] Route fp8 prefill + fp8 decode-fast; validate correctness+perf
+[L1797] Update GENERALIZATION_PLAN.md, commit + push fp16/fp8 fast path
+[L1828] Validate fp16 correctness + perf (decode_hd128_fp16_gqa 0.29->0.94)
+[L1828] fp8: TIn/TC split - load fp8 + convert->bf16 smem, reuse bf16 wgmma path
+[L1828] fp8 descale folding (qd*kd into scale, vd into output)
+[L1864] Route fp8 prefill (0.016->0.26) + fp8 decode (0.29->0.61); validated
+[L1864] Full 26-config trial: confirm geomean lift + no regressions
+[L1872] Full 26-config trial: geomean 0.343->0.408, weighted 0.461->0.513, 26/26 correct
+[L1872] Update GENERALIZATION_PLAN.md, commit + push fp16/fp8 fast path (0b25acd)
+[L1878] Study PTX docs: wgmma.m64nNk32 e4m3 operand/accumulator/descriptor + RS-mode A fragment layout
+[L1878] Study FA3 fp8 mainloop: smem layout, P->fp8 conversion, V transpose, descale
+[L1878] Study CUTLASS SM90 fp8 GMMA atom + smem swizzle layout
+[L1878] Write probe kernel to validate fp8 1-byte 128B swizzle smem layout + wgmma QK bit-exact
+[L1878] Implement fp8 QK wgmma (m64n128k32 e4m3) + fp8 swizzle gather/TMA
+[L1878] Implement fp8 PV wgmma (m64n64k32 e4m3) with P packed to fp8 (RS mode)
+[L1878] Descale folding for native fp8 path + bf16 output epilogue
+[L1878] Validate fp8 prefill + decode correctness, iterate perf to 1.0x
+[L1878] Update doc, commit + push native fp8 wgmma path
+[L1887] Study PTX: wgmma fp8 layouts. DONE: QK probe PASS (koff8 swizzle, LBO16/SBO1024, k32 step=kb*32)
+[L1887] Study FA3 fp8 mainloop - DONE (128x192 tile, V LDSM.T transpose, permute_Cregs_fp8, descale)
+[L1887] Study CUTLASS fp8 GMMA - DONE (ALayout_64x32, CLayout_64xN, fp8 SS/RS PTX)
+[L1887] Probe: PV fp8 (m64n64k32 RS) - V transpose K-major + P A-fragment layout
+[L1887] Implement fp8 QK wgmma in fa3_fwd (m64n128k32 e4m3 SS) + fp8 swizzle gather
+[L1887] Implement fp8 PV wgmma (m64n64k32 RS) + V transpose + P->fp8 permute
+[L1887] Descale folding + bf16 output epilogue for native fp8
+[L1888] Study PTX/FA3/CUTLASS fp8 layouts - DONE; QK probe PASS (koff8, LBO16/SBO1024, k32 step)
+[L1888] Probe: PV fp8 (m64nNk32 RS) - V transpose K-major + P A-fragment register layout
+[L1888] Implement fp8 PV wgmma (m64nNk32 RS) + V transpose + P->fp8 permute
+[L1927] Study PTX/FA3/CUTLASS fp8 layouts + QK/PV probes PASS
+[L1927] Probe PV fp8 (V transpose + P-in-smem SS) - PASS
+[L1927] Implement native fp8 QK+PV+V-transpose+P-scatter in fa3_fwd
+[L1927] Native fp8 prefill: 1.027x (was 0.26). Run full 26-config suite for regressions
+[L1927] Assess decode_hd128_fp8_gqa (0.60 convert path) - native fp8 or decode-path lever
+[L1990] Native fp8 prefill+decode validated; full 26-config suite 26/26
+[L1990] fp8 decode -> native split-KV: 0.61 -> 0.96 (beats fp16 0.94)
+[L1990] Commit + push native fp8 wgmma prefill & decode
+[L1998] Map current wgmma kernel: what's hardcoded to hd64/128, smem budget, swizzle, QK/PV helpers
+[L1998] Study FA3/cutlass tiling (kBlockN, swizzle atom, stages) for hd96/192/256
+[L1998] hd192 prefill via wgmma (smem retune: stages/CTA_N) -> parity
+[L1998] hd256 prefill via wgmma -> parity
+[L1998] hd96 prefill (non-64-mult swizzle handling) -> parity
+[L1998] Route hd96/192/256 decode through wgmma split-KV (incl diffv hd192/hdv128)
+[L1998] hd256 + softcap + SWA (gemma2) via EXTRA path -> parity
+[L1998] Full 26-config suite: confirm Tier-1 at parity, no regressions
+[L2019] Mapped kernel: generic helpers exist; blockers = smem budget + non-64 swizzle
+[L2019] hd96 prefill+decode via HDsm padding: prefill 1.35, decode 1.02
+[L2019] Commit hd96 win
+[L2019] Template CN through swizzle/QK/PV/softmax for CTA_N=64
+[L2019] hd192 prefill+decode via CN=64 STAGES=3 -> parity
+[L2019] hd256 prefill+decode via CN=64 STAGES=2 (watch acc_o[128] regs) -> parity
+[L2019] diffv hd192/hdv128 decode + gemma2 hd256+softcap+SWA -> parity
+[L2019] Full 26-config suite: Tier-1 at parity, no regressions
+[L2080] hd192 prefill 1.095 + decode 0.797 -> push decode to parity
+[L2080] hd256 prefill 0.706 + decode 0.76 -> push to parity (CN=64 STAGES=2, acc_o[128] spill)
+[L2080] diffv hd192/hdv128 decode 0.785 -> parity
+[L2080] hd256 gemma2 (softcap+SWA) 0.493 -> parity (EXTRA cost)
+[L2080] Study FA3/cutlass tiling (kBlockN, stages) for hd192/256
+[L2239] Locked: prefill_hd256 0.97 (CN=48 STAGES=3), gemma2 0.67 (decode DCN=48 STAGES=3)
+[L2239] Add CM template param to qk_batch_g/qk_gemm_g/qk_rs_pv_g (A-desc qk_doffR<CM>)
+[L2239] Template prefill_kernel on CM: derive NCONS/NTHR, CTA_M->CM, consumer indexing, smem
+[L2239] Template launch_prefill_t on CM; decode-split passes CM=64 (1 consumer WG)
+[L2239] Build + validate correctness, measure decode configs
+[L2239] Tune CN/STAGES for decode now that Q smem is halved (deeper pipeline)
+[L2239] Run full 26-config suite, confirm no regressions + Tier-1 gains
+[L2292] CM template param threaded through gemm helpers + kernel + launcher
+[L2292] prefill_kernel templated on CM (NCONS/NTHR derived)
+[L2292] decode-split uses CM=64 (1 consumer WG) + deeper STAGES
+[L2292] Validated: huge decode gains, all correct
+[L2292] Tuned DCN wide/deep + split guard; windowed->wide
+[L2292] Run full 26-config suite, confirm geomean + no regressions
+[L2292] Push hd256 decode/gemma2 (0.81-0.88) - register pressure bound
+[L2339] Route HD>=192 non-windowed decode through deep split heuristic (DONE: hd192_gqa 0.92->1.02, geomean 0.957->0.962)
+[L2339] Push hd256 decode (gqa 0.88, gemma2 0.815) toward parity - smem-bound 1 CTA/SM + M-waste
+[L2339] Push decode_hd192_diffv 0.901 -> 1.0 (pipeline-fill vs split-count tuning)
+[L2339] Eliminate dead scalar/warp fallback so SASS verdict is clean (no spill, no scalar path)
+[L2339] Final full 26-config suite confirmation
+[L2359] hd256 decode: gqa 0.88->0.971 (CN=64 deep). gemma2 stuck 0.816 (hd256+softcap+rep2 M-waste)
+[L2359] Removed dead warp-decode (path3, identical predicate) + scalar attn_kernel (path4). 26/26 correct, spills 568->33
+[L2359] Push decode_hd192_bf16_diffv 0.899 -> 1.0 (try wider CN=96 like hd256_gqa)
+[L2367] diffv: tried CN=96 (regressed to 0.869), reverted. Stays 0.89 - deep STAGES=5 ceiling
+[L2367] Final full 26-config suite: 26/26 correct, geomean 0.962, spills 593->33, no scalar fallback
+[L2386] NCU-profile the worst configs (chunk16k 0.77, split 0.77, longctx 0.84) to find the real bottleneck
+[L2386] Fix chunked/long prefill (chunk16k 0.77, mixed 0.79) - load balance / producer / scheduler
+[L2386] Fix split/longctx/spec decode (0.77-0.85) - combine overhead / MLP / occupancy
+[L2386] Confirm general win across full suite, no regressions, no scenario hard-coding
+[L2455] NCU-profile worst configs - DONE (decode=occupancy/latency-bound, chunk16k=wgmma-bound, mixed=load-imbalance)
+[L2455] Fix chunked/long prefill - tested narrow-CN deep pipeline (regressed); chunk16k is wgmma-bound at ceiling
+[L2455] Fix split/longctx decode - tested 2-CTA & 2nd-WG (both regressed); diffv won via 2-CTA (0.89->0.95)
+[L2455] Full suite: 26/26 correct, geomean 0.970, weighted 0.915, no regressions, committed
+[L2494] Add make_kv_map_contig (2D tensormap over contiguous non-paged KV)
+[L2494] Add non-paged TMA branch in prefill_kernel producer
+[L2494] Enable non-paged contiguous TMA in launch_decode_split
+[L2494] Build + correctness on dev set (non-paged hd64 + paged hd128)
+[L2494] Full perf suite: verify non-paged decode cluster gains, no regressions
+[L2507] make_kv_map_contig - implemented & tested (reverted: neutral)
+[L2507] Non-paged TMA producer branch - implemented & tested (reverted: neutral)
+[L2507] Non-paged TMA dispatch - implemented & tested (reverted: neutral)
+[L2507] Correctness verified (byte-exact) on non-paged hd64 + paged hd128
+[L2507] Controlled A/B: non-paged TMA neutral-to-negative (-0.003), reverted
+[L2542] Read FA3.md + cutlass.md docs and map reference repo structure
+[L2542] Map our fa3_fwd.cu decode/prefill paths + scheduler/combine/mask for the target configs
+[L2542] Trace FA3 persistent + varlen tile scheduler (mixed/chunk16k tail)
+[L2542] Trace FA3 inter-WG ping-pong / warp-scheduler barriers (chunk16k prefill)
+[L2542] Trace FA3 decode tiny-M handling: register-resident-P / mma / GQA pack (longctx/split/spec)
+[L2542] Trace FA3 split-KV combine kernel (split/longctx)
+[L2542] Trace FA3 softcap+SWA (gemma2) and paged block_size=32 (blk32) handling
+[L2542] Compare each FA3 optimization vs our code; pinpoint the gaps
+[L2542] Produce concrete replicate/copy plan (files, code/PTX, integration points)
+[L2550] Map our fa3_fwd.cu decode/prefill paths + scheduler/combine/mask
+[L2550] Trace FA3 persistent + varlen tile scheduler
+[L2550] Trace FA3 inter-WG ping-pong / warp-scheduler barriers
+[L2550] Trace FA3 decode tiny-M handling
+[L2550] Trace FA3 split-KV combine kernel
+[L2550] Trace FA3 softcap+SWA (gemma2) and paged block_size=32 (blk32)
+[L2550] Produce concrete replicate/copy plan
+[L2579] Item 2: FA3-style combine kernel rewrite + A/B
+[L2579] Item 3: inter-WG ping-pong for compute-bound prefill (chunk16k)
+[L2579] Item 1: persistent + varlen tile scheduler (mixed/load-imbalance)
+[L2579] Item 4: split heuristic + masked-block skipping (gemma2)
+[L2585] Map our prefill consumer WG mainloop (CM=128 path, QK/softmax/PV ordering, named barriers)
+[L2585] Trace FA3 ping-pong NamedBarrier mechanism (WarpScheduler WG1/WG2, arrive/sync placement)
+[L2585] Implement inter-WG ping-pong in prefill consumer
+[L2585] Build + correctness on chunk16k/prefill configs
+[L2585] A/B perf vs baseline
+[L2622] Map our prefill consumer WG mainloop
+[L2622] Trace FA3 ping-pong NamedBarrier mechanism
+[L2658] NCU-diff FA3 vs ours on mixed + longctx16k to confirm signature
+[L2658] Design persistent-scheduler change for prefill_kernel (grid=num_sm, grid-stride tiles, cross-tile prefetch)
+[L2658] Implement persistent scheduler in fa3_fwd.cu prefill path
+[L2658] Build + correctness on chunk16k/mixed/noncausal
+[L2658] A/B perf vs baseline; re-evaluate ping-pong barrier cost
+[L2674] Design persistent-scheduler change for prefill_kernel
+[L2712] Build + correctness on prefill configs (8/8 correct)
+[L2712] A/B perf: persistent v1 REGRESSED (chunk16k .79->.60, hd256 .97->.44) -> reverted to baseline+ping-pong (restored: .798/.812/1.128/.966)
+[L2712] Log result in fa3-parity canvas (naive persistent regresses; needs continuous-ring design)
+[L2720] Study FA3 mainloop_fwd_sm90 + tile_scheduler: continuous-ring pipeline (Q buffering, K/V stages, cross-tile phase persistence, smem budget for hd128)
+[L2720] Design our continuous-ring persistent prefill (scoped to hd128 bf16): producer cross-tile prefetch, Q double-buffer, continuous full/empty phases, consumer per-item softmax/epilogue
+[L2720] Work out smem budget (STAGES vs Q double-buffer) to fit 228KB on hd128
+[L2720] Implement continuous-ring persistent kernel (separate from per-tile prefill_kernel; gate hd128 to it, keep hd192/256/fp8 on proven path)
+[L2720] Correctness on chunk16k/mixed/noncausal/hd128-causal (multi-tile early)
+[L2720] A/B perf vs baseline; confirm chunk16k/mixed move materially without regressing others
+[L2729] Add PfTile struct + pf_work() work-item decoder (producer/consumer agree)
+[L2729] Implement prefill_persist_kernel: continuous-ring producer (1-tile prefetch before Q, global-g empty-gate) + consumer (global-g stage/phase, per-item softmax/epilogue, barQ ping-pong)
+[L2729] Route hd128+TMA bf16 prefill to persistent kernel in launch_prefill_t (static-strided grid=min(work,SM), no atomic counter)
+[L2729] Build the .so and fix compile errors
+[L2729] Correctness on chunk16k/mixed/noncausal/hd128-causal
+[L2729] A/B perf vs baseline; confirm chunk16k/mixed move without regressing others
+[L2746] Implement prefill_persist_kernel continuous-ring
+[L2746] Route hd128+TMA bf16 prefill to persistent kernel
+[L2746] Correctness on chunk16k/mixed/noncausal/per-tile fallbacks
+[L2762] A/B perf: continuous-ring regresses all 3 (chunk16k .794->.745, mixed .808->.213, noncausal 1.128->1.072). Gated OFF, baseline restored.
+[L2783] Read & extract the exact device helpers for the hd128 bf16 consumer mainloop (swizzle, descriptors, qk_batch_g, softmax_stats, mask, pv_boxes, pack, fences, regs)
+[L2783] Write torch-free standalone microbenchmark (mainloop_micro.cu): 3-WG structure (idle producer for real reg budget), pre-staged smem K/V, run our current mainloop over N tiles, self-time
+[L2783] Compile microbenchmark with nvcc for sm_90a; confirm it runs
+[L2783] NCU our current mainloop in isolation: tensor-pipe-active %, registers, stalls. Decide if schedule gap is real (52%) or already ~76% (=> producer-bound)
+[L2783] Establish FA3 target: extract/measure FA3 mainloop tensor% on identical tile (or NCU FA3 .so on chunk16k) + its register count
+[L2783] If schedule gap real: iterate our schedule (deeper QK[i+1] || softmax[i] overlap, wait/commit placement) toward FA3 tensor% within reg budget
+[L2783] Transfer winning schedule into fa3_fwd.cu consumer; A/B chunk16k ratio (the real metric)
+[L2794] DONE: isolated mainloop = 73-74% tensor (==FA3's 76%). Schedule is NOT the gap; chunk16k 52% is a FEED/scheduling problem.
+[L2794] FA3 target known (76% from plan); our compute ceiling 74% confirms parity at the schedule level
+[L2794] Cancelled: replicating GMMA schedule is moot (already matched)
+[L2794] Cancelled (schedule transfer moot)
+[L2794] Localize the real chunk16k gap: NCU full kernel stall breakdown (producer-feed vs causal-triangle fill bubble vs Q-load)
+[L2794] Design + test the fix for the localized feed/scheduling gap (in micro first, then transfer)
+[L2795] DONE: isolated mainloop = 73-74% tensor (==FA3 76%). GMMA schedule is NOT the gap.
+[L2795] Localize real chunk16k gap: NCU full kernel stall breakdown (producer-feed vs causal-triangle fill bubble vs Q-load)
+[L2795] Design + test the fix for the localized feed/scheduling gap (micro first, then transfer to fa3_fwd.cu)
+[L2795] A/B chunk16k ratio after the fix (the real metric)
+[L2809] DONE: isolated mainloop = 74% tensor (==FA3 76%). GMMA schedule is NOT the gap.
+[L2809] DONE: chunk16k gap fully localized to the K/V FEED: full=54% vs micro=74%, delta = +0.63 long_scoreboard + 0.44 barrier (TMA latency + producer/consumer handshake+fence). Not the schedule, not the causal triangle (chunk16k is q2048/k16384 = long tiles).
+[L2809] Inspect producer cost: paged block_size=16 -> 32 single-threaded tma_box per K/V tile (2KB each). Likely producer-issue/latency bound.
+[L2809] Design + A/B the feed fix (reduce/parallelize paged-TMA issue; cut per-tile fence/handshake) on chunk16k
+[L2817] Read producer TMA block + template params (USE_TMA/CONV/MINB), full[] mbar_init, page_table usage; confirm parallel-lane plan is correct
+[L2817] Implement parallel-lane paged-TMA producer: each lane issues one page (parallel page_table read + boxes), full[] init count = pages, per-lane expect_tx(page_bytes)
+[L2817] Build the .so via harness
+[L2817] Correctness check chunk16k + the other hd128 prefill/paged configs
+[L2817] A/B chunk16k ratio (baseline 0.794) + re-NCU tensor%/long_scoreboard/barrier to confirm the feed gap closed
+[L2837] DONE: parallel-lane paged-TMA producer (each lane issues one page; full[] count=pages; per-lane expect_tx)
+[L2837] DONE: 7/7 paged-TMA prefill configs correct (hd64/96/128/192/256, noncausal, mixed)
+[L2837] DONE: chunk16k 0.794->0.866 (+9%), mixed 0.808->0.912 (+13%), noncausal 1.128->1.17; no regressions. NCU confirms feed gap closed (tensor 54->62%, long_sb 0.63->0.20, barrier 0.64->0.35)
+[L2837] Record result on parity canvas
+[L2837] Optional follow-up: trim residual per-tile proxy-fence/handshake (barrier 0.35) + remaining TMA latency to push 62%->74% ceiling
+[L2842] Recorded result on parity canvas
+[L2875] Diagnose the decode group via NCU (gemma2, spec, blk32, swa, longctx32k, split): get tensor%/SM SOL/DRAM/occupancy/waves/stall breakdown per config; group by true root cause
+[L2875] Confirm chunk16k residual lever (fence/handshake) — quantify achievable from 62%->74% ceiling
+[L2875] Build decode-mainloop isolation microbench if a 'schedule vs feed vs occupancy' split is needed (like chunk16k)
+[L2875] Design + A/B targeted fix(es) for the highest-value tractable configs
+[L2875] Full re-sweep + update canvas after fixes
+[L2935] Diagnose decode group via NCU + split sweep
+[L2935] Confirm chunk16k residual lever (near 74% iso ceiling)
+[L2935] Decode-mainloop isolation microbench (not needed; split sweep was the decisive diagnostic)
+[L2935] Ship wave-quantization-aware decode split heuristic
+[L2935] Full re-sweep + update canvas
+[L2935] Push 79c234c (blocked: GitHub SSH unreachable mid-session)
+[L2943] Diagnose decode_hd128_split (0.863): FA3 hint semantics, NCU at 4 splits, anti-cheat constraints on num_splits
+[L2943] Design + A/B a legitimate fix to get split >= 0.9
+[L2943] Diagnose chunk16k residual (page-table reads / per-tile fence / handshake)
+[L2943] Design + A/B a fix to get chunk16k >= 0.9
+[L2943] Full trial: correctness + perf for both, confirm no regressions
+[L2943] Commit + push once SSH connectivity returns
+[L2973] Diagnosed split: GPU-starved by forced num_splits=4 (FA3 honors it too -> 16 CTAs), per-CTA wait-bound (M-waste). STAGES/prefetch don't help; fence removal +0.008 -> 0.871
+[L2973] Diagnosed chunk16k: mainloop now at micro-ceiling efficiency (wait 1.33), residual = producer handshake (barrier 0.42) + feed (long_sb 0.18) at STAGES=3 (smem-capped). Fence removal +0.003 -> 0.874
+[L2973] Pushed 79c234c + 42c485f to origin/main (SSH recovered)
+[L2973] DECISION NEEDED: split to 0.9 needs num_splits override (gaming) or narrow-M rewrite
+[L2973] DECISION NEEDED: chunk16k near ceiling; longer-shot levers (narrow-CN deep / 32-lane producer)
+[L2973] Full trial: correctness + perf, confirm no regressions
+[L3007] DONE: split 0.871->0.965 via dropping at::full LSE pre-fill (emit_empty_lse). Committed+pushed (6090644)
+[L3007] chunk16k 0.875 -> >=0.9: try CN=96/STAGES=4 deeper pipeline and/or 32-lane TMA producer
+[L3041] Re-read chunk16k shape config + current producer/consumer loop structure
+[L3041] Fresh NCU profile of chunk16k: confirm exact stall breakdown + smem/occupancy headroom
+[L3041] Identify and implement an untried lever (K/V split-ring, asymmetric stages, barrier tuning, etc.)
+[L3041] A/B measure chunk16k + guard against prefill regressions (mixed, noncausal, hd256)
+[L3041] Full correctness + perf trial if a win lands
+[L3091] Re-read chunk16k shape + producer/consumer + FA3 tile config
+[L3091] Confirm bottleneck: REG:168 no-spill, gap is long_sb feed (prior PC-sampling + 2 reproductions)
+[L3091] Tried K/V barrier decouple (0.877->0.867) + page-table prefetch (0.877->0.871): both ~0, reverted
+[L3091] Implement separate K/V rings (SK=4/SV=2): K frees after QK -> deeper prefetch, gated hd128-TMA
+[L3091] A/B chunk16k + guard noncausal/mixed; full 26-config trial if win
+[L3144] Add fa3test config set mirroring FA3 forward test grids (dense/varlen/kvcache) to config.py
+[L3144] Make fa3test resolvable in get_configs + perf subprocess _cfg
+[L3144] Run trial on fa3test set: correctness + perf vs FA3
+[L3144] Summarize correctness + perf results by scenario group
+[L3163] Summarize correctness + perf results by scenario group (canvas)
+[L3177] Map prefill + decode kernels, dispatch, and where softcap/window/masking are handled
+[L3177] Rework mha_fwd dispatch: decode-first, relaxed prefill to cover medium-q (5-63) and rep>16
+[L3177] Implement softcap in the prefill kernel softmax
+[L3177] Implement sliding-window masking in the prefill kernel
+[L3177] Verify all 40 fa3test scenarios correct (0 unsupported, 0 wrong)
+[L3177] Verify no perf regression on FULL set (26 configs)
+[L3177] Profile + compare FA3/CUTLASS to diagnose non-paged dense prefill gap
+[L3187] Implement softcap in the prefill kernel softmax (already present; enabled via dispatch)
+[L3187] Implement sliding-window masking in the prefill kernel (already present; enabled via dispatch)
+[L3232] Study prefill producer (paged-TMA + cp.async gather), consumer smem layout, make_kv_map swizzle
+[L3232] Add make_kv_map_contig: 2D TMA map over non-paged [hkv*hd, total_k]
+[L3232] Add non-paged TMA producer branch in prefill kernel (per-tile [CN,64] boxes)
+[L3232] Enable use_tma for non-paged contiguous KV (hd/hdv %64==0)
+[L3232] Correctness on dense hd128/hd256 + varlen (TMA path)
+[L3232] Perf: confirm dense gap closes, no FULL-set regression
+[L3270] Route medium-q (q<=32,q*rep<=64) to split-KV decode
+[L3270] Re-profile post-TMA to find next bottleneck (persistence)
+[L3276] Add non-paged TMA branch to prefill_persist_kernel load_kv (guard pages/last_pg div-by-zero)
+[L3276] Enable PF_PERSIST for non-paged dense (TMA, num_splits<=1, multi-wave); keep varlen/paged on per-tile
+[L3276] Correctness: dense hd64/128/192/256 + varlen still correct
+[L3276] Perf: dense gap closes via persistence; no varlen/FULL regression
+[L3302] Persistence for non-paged dense: implemented, measured (regresses via single-Q serialization), reverted+documented
+[L3302] Fix EXTRA-softmax tensor-pipe starvation: collapse pf_mask_win to per-row [lo,hi] bounds (softcap/local 0.63→0.81)
+[L3302] Investigate fp8 (already native e4m3; separate no-TMA kernel — deep rewrite, deferred)
+[L3302] Update results canvas with mask win + persistence finding
+[L3338] Confirm PF_PERSIST=false revert restores ~1.011x geomean baseline
+[L3338] Profile fp8 dense + fp8 decode vs FA3 to find bottleneck
+[L3338] Study prefill_fp8_kernel structure (V-transpose, P smem round-trip)
+[L3338] Implement targeted fp8 optimization and measure
+[L3378] Profile fp8 dense + fp8 decode vs FA3 to find bottleneck (long_scoreboard 55.7%)
+[L3378] Implement cp.async fp8 loads + staging-ring V transpose (dense 0.689->0.753, decode 0.765->0.881)
+[L3378] Final build+eval to confirm cleaned source: no regressions, fp8 gains hold
+[L3392] Final build+eval confirmed: fp8 dense 0.755, decode 0.875, geomean 1.016, 40/40, no regressions
+[L3392] Update results canvas with fp8 win + persistence dead-end finding
+[L3434] Add TMA-Q load path to persistent kernel (rep==1 contiguous)
+[L3434] Switch persist to single-Q (QBUF=1) + PSTAGES=STAGES; generalize phase logic
+[L3434] Enable PF_PERSIST for rep==1 non-paged bf16/fp16; build mapQ + smem
+[L3434] Build + eval: verify 40/40 correct and measure hd256/hd192/hd128 dense
+[L3434] Keep if it wins (no regressions); else revert + document
+[L3461] Add atomic dynamic work scheduler to balance causal load
+[L3461] Build + eval: 40/40 correct, geomean 1.016->1.039, hd256 0.72->0.83, hd192 0.75->0.89
+[L3461] Commit + push dynamic-scheduler persist win
+[L3461] Push hd256 (0.827) and hd192 (0.888) toward 0.9 (STAGES=2/wider-CN persist or TMA-O)
+[L3476] Commit + push current state
+[L3476] Profile fa3_dense_hd256_causal (0.827x) to find bottleneck
+[L3476] Profile fa3_dense_hd192_causal (0.888x) to find bottleneck
+[L3476] Profile fa3_dense_hd128_fp8 (0.756x) to find bottleneck
+[L3476] Implement targeted fix(es) based on profiling
+[L3476] Build + eval: confirm gains, no regressions, 40/40 correct
+[L3542] Profile fa3_dense_hd192_causal to find bottleneck
+[L3542] Implement targeted fix(es): persistent fp8 kernel (0.756->0.826)
+[L3542] Full eval: 40/40 correct, geomean 1.049, hd192 0.900
+[L3542] Update results canvas with this session's findings
+[L3558] Build current HEAD for profiling
+[L3558] Profile qlen120, gqa, large4k, mqa, local vs FA3
+[L3558] Identify common root causes across the cluster
+[L3558] Implement targeted fixes
+[L3558] Full eval: confirm gains, no regressions, 40/40 correct
+[L3604] qlen120: underfill->split-KV decode route (DONE 0.812->0.921)
+[L3604] gqa/mqa/local: attack 8.73-wave no-persistence
+[L3622] gqa/mqa: TMA-Q persist (DONE 0.82->0.91/0.92)
+[L3622] Commit + push GQA TMA-Q + underfill route
+[L3622] large4k 0.823: barrier-bound rep==1 persist
+[L3622] local 0.854: windowed GQA persist
+[L3622] Full eval: confirm gains, no regressions, 40/40
+[L3722] Find FA3/cutlass ping-pong (warp_scheduler_barrier) reference impl
+[L3722] Design named-barrier ping-pong for persist kernel's 2 consumer WGs
+[L3722] Implement ping-pong (gated, revertible) in prefill_persist_kernel
+[L3722] Verify 40/40 correctness
+[L3722] Measure large4k + CM=128 family; keep only if net win
+[L3722] Commit+push if win, else revert with doc note
+[L3745] Commit+push ping-pong (local 0.89->0.95, causal 0.95->0.97)
+[L3745] Update canvas with ping-pong results
+[L3803] Rewrite README: concise build/run/test + per-scenario speedup table
+[L3803] Delete old-path kernel/probe/oracle files in kernels/
+[L3803] Delete old-path root files (oracle.py, inspect_ptx.py, bench_fa3.py, Makefile, results/)
+[L3803] Delete stale untracked artifacts (fused_attn binary, bench_fa3.json)
+[L3803] Tidy .gitignore for removed results/ scaffolding
+[L3803] Verify kept files build/reference correctly; no dangling refs
+[L3827] bench/config.py: Config dataclass + 40 fa3test configs + build/tolerance constants
+[L3827] bench/shapes.py: make_inputs, fwd_args, call_fwd, ref_fp32 (ported)
+[L3827] bench/eval.py: build_candidate + check_correctness + measure + driver
+[L3827] requirements.txt for torch + vllm baseline
+[L3827] Update README build/run/test to use in-repo bench harness
+[L3827] Run bench eval end-to-end to confirm self-contained build/correctness/perf
+
+--- unique todo items: 544
