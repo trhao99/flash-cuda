@@ -72,20 +72,30 @@ struct Params {
 
 template <typename TIn, typename TOut>
 __global__ void attn_kernel(Params<TIn, TOut> p) {
+  //Q[total_q, hq, hd] K[total_k, hkv, hd] V[total_k, hkv, hdv] O[total_q, hq, hdv]
   const int warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
   const int lane = threadIdx.x & 31;
   const long total_pairs = (long)p.total_q * p.hq;
   if (warp >= total_pairs) return;
+  //一个warp处理Q的一个head，hq个头由hq个warp处理，所以warp/p.hq就是对应的Q的第0个维度的下标
   const int q_idx = warp / p.hq;
+  // 要处理第q_idx个token的第head个头
   const int head  = warp % p.hq;
+  // 为了减少运算规模，通常会减少k和v的head数量，使得q的head数量是k和v的head数量的倍数，hq/hkv代表一个k，v的head要给几个q的head服务
+  // head / (hq/hkv) 表示q的第head个头对应kv的第几个头
   const int hk    = head / (p.hq / p.hkv);
 
   // locate batch b s.t. cu_q[b] <= q_idx < cu_q[b+1]
+  // b存储他是在第几个区间
   int b = 0;
   while (b + 1 <= p.b && p.cu_q[b + 1] <= q_idx) ++b;
+  // q_in_seq这段区间内的token下标
   const int q_in_seq = q_idx - p.cu_q[b];
+  // sq这段query的长度，有几个token
   const int sq = p.cu_q[b + 1] - p.cu_q[b];
+  // K/V是随着Q而变化的，第b个query，对应第b个key
   const int klen = p.seqused_k ? p.seqused_k[b] : (p.cu_k[b + 1] - p.cu_k[b]);
+  // 最终目的是让Q和K的token右对齐，第b个query的Q的最后一个token，对应第b个query的K/V的最后一个token
   const int q_abs = klen - sq + q_in_seq;   // causal alignment: last query <-> last key
 
   // Descale is stride-aware (vLLM passes a BROADCAST (b,hkv) tensor with stride [0,0] and one
@@ -94,24 +104,32 @@ __global__ void attn_kernel(Params<TIn, TOut> p) {
   float qd = p.q_descale ? p.q_descale[ds_idx] : 1.f;
   float kd = p.k_descale ? p.k_descale[ds_idx] : 1.f;
   float vd = p.v_descale ? p.v_descale[ds_idx] : 1.f;
+  // qk_scale = 1 / sqrt(d)
   const float qk_scale = p.scale * qd * kd;
 
   // load q row into per-lane registers
+  // Q的一个token行有hd列，将hd列平均分给32个线程，每个线程处理hd/32列，per表示每个线程要处理多少个元素
   const int per = (p.hd + 31) / 32;
+  // MAX_HD是hd的上界
   float qreg[(MAX_HD + 31) / 32];
+  // q_row=q.stride(0),跳过q_idx个token的hd列，q_head=q.stride(1),跳过head个头，得到第q_idx个token的第head个头在q中的基地址
   const TIn* qp = p.q + (long)q_idx * p.q_row + (long)head * p.q_head;
+  // 将这hd列元素分别搬到每个线程的寄存器中，e=0时thread_0,thread_1,...thread_31分别将qp对应元素同时搬进去，e=1到per-1同理
   #pragma unroll
   for (int e = 0; e < per; ++e) { int d = lane + e * 32; qreg[e] = d < p.hd ? to_float<TIn>(qp[d]) : 0.f; }
 
+  // V的一个行有hdv列元素，分别将其分配给1个warp的32个线程
   const int perv = (p.hdv + 31) / 32;
   float acc[(MAX_HD + 31) / 32];
   #pragma unroll
   for (int e = 0; e < perv; ++e) acc[e] = 0.f;
+  // m是当前行的当前的最大值，l是当前的和
   float m = -INFINITY, l = 0.f;
 
   for (int j = 0; j < klen; ++j) {
     bool masked = false;
     if (p.causal && j > q_abs) masked = true;
+    //滑动注意力，超过K的范围直接跳过计算
     if (p.win_l >= 0 && j < q_abs - p.win_l) masked = true;
     if (p.win_r >= 0 && j > q_abs + p.win_r) masked = true;
     if (masked) continue;
@@ -121,8 +139,10 @@ __global__ void attn_kernel(Params<TIn, TOut> p) {
       int blk = p.page_table[(long)b * p.page_stride + j / p.block_size];
       krow = ((long)blk * p.block_size + (j % p.block_size));
     } else {
+      // 全局K的行号
       krow = (long)p.cu_k[b] + j;
     }
+    // 跳过前面krow行，跳过前hk个头，得到第krow行的第hk个头在k中的基地址
     const TIn* kp = p.k + krow * p.k_row + (long)hk * p.k_head;
     float dot = 0.f;
     #pragma unroll
@@ -136,7 +156,8 @@ __global__ void attn_kernel(Params<TIn, TOut> p) {
     l = l * corr + pj;
     const TIn* vp = p.v + krow * p.v_row + (long)hk * p.v_head;
     #pragma unroll
-    for (int e = 0; e < perv; ++e) { int d = lane + e * 32; float vv = d < p.hdv ? to_float<TIn>(vp[d]) * vd : 0.f; acc[e] = acc[e] * corr + pj * vv; }
+    for (int e = 0; e < perv; ++e) 
+    { int d = lane + e * 32; float vv = d < p.hdv ? to_float<TIn>(vp[d]) * vd : 0.f; acc[e] = acc[e] * corr + pj * vv; }
     m = m_new;
   }
 
