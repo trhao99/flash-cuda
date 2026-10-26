@@ -125,7 +125,7 @@ __global__ void attn_kernel(Params<TIn, TOut> p) {
   for (int e = 0; e < perv; ++e) acc[e] = 0.f;
   // m是当前行的当前的最大值，l是当前的和
   float m = -INFINITY, l = 0.f;
-
+   // 遍历K的每一行，计算Q的第q_idx个token的第head个头和K的每一行的点积，构成了O的一行元素
   for (int j = 0; j < klen; ++j) {
     bool masked = false;
     if (p.causal && j > q_abs) masked = true;
@@ -145,19 +145,27 @@ __global__ void attn_kernel(Params<TIn, TOut> p) {
     // 跳过前面krow行，跳过前hk个头，得到第krow行的第hk个头在k中的基地址
     const TIn* kp = p.k + krow * p.k_row + (long)hk * p.k_head;
     float dot = 0.f;
+    // Qi 点乘 Kj^T
     #pragma unroll
     for (int e = 0; e < per; ++e) { int d = lane + e * 32; if (d < p.hd) dot += qreg[e] * to_float<TIn>(kp[d]); }
     float s = warp_reduce_sum(dot) * qk_scale;
+    // 柔化，防止过大过小的值导致梯度消失或爆炸
     if (p.softcap > 0.f) s = p.softcap * tanhf(s / p.softcap);
 
     float m_new = fmaxf(m, s);
     float corr = __expf(m - m_new);
     float pj = __expf(s - m_new);
     l = l * corr + pj;
+    // 第krow行的第hk个头在v中的基地址,随着外层j循环遍历，V按照行方向向下遍历取值
     const TIn* vp = p.v + krow * p.v_row + (long)hk * p.v_head;
     #pragma unroll
     for (int e = 0; e < perv; ++e) 
-    { int d = lane + e * 32; float vv = d < p.hdv ? to_float<TIn>(vp[d]) * vd : 0.f; acc[e] = acc[e] * corr + pj * vv; }
+    { 
+        int d = lane + e * 32; 
+        // d超过列数范围，不参与计算
+        float vv = d < p.hdv ? to_float<TIn>(vp[d]) * vd : 0.f;
+        acc[e] = acc[e] * corr + pj * vv;
+    }
     m = m_new;
   }
 
@@ -165,6 +173,9 @@ __global__ void attn_kernel(Params<TIn, TOut> p) {
   float inv = l > 0.f ? 1.f / l : 0.f;
   #pragma unroll
   for (int e = 0; e < perv; ++e) { int d = lane + e * 32; if (d < p.hdv) op[d] = from_float<TOut>(acc[e] * inv); }
+  // lse: log-sum-exp 当前行的最大值m+log(和)，用于后续的反向传播
+  //Q[total_q, hq, hd]
+  // lse[head][q_idx] -> p.lse[head * total_q + q_idx]
   if (lane == 0) p.lse[(long)head * p.total_q + q_idx] = (l > 0.f) ? (m + logf(l)) : (-INFINITY);
 }
 
