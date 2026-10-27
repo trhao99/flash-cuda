@@ -263,7 +263,7 @@ __device__ __forceinline__ float ex2_approx(float x) {
 }
 __device__ __forceinline__ void wgmma_wait0() { asm volatile("wgmma.wait_group.sync.aligned 0;\n" ::: "memory"); }
 __device__ __forceinline__ void wgmma_wait1() { asm volatile("wgmma.wait_group.sync.aligned 1;\n" ::: "memory"); }
-
+//关于输入参数s2,由于gpu不支持原生的e^x,只有2^x,所以使用换底公式，e^x = 2^(x*log_2(e)),s2 = 1/sqrt(d) * log_2(e)
 template <int CN = CTA_N>
 __device__ __forceinline__ float softmax_stats(float (&s)[CN/2], float* m_r, float* l_r, int r, int nb, float s2) {
     float b0 = -INFINITY, b1 = -INFINITY, b2 = -INFINITY, b3 = -INFINITY;
