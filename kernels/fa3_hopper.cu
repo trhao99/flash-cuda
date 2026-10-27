@@ -193,7 +193,10 @@ namespace pf {
 #ifndef PF_CPASYNC
 #define PF_CPASYNC 1
 #endif
+// CTA_M * CTA_N 描述的是S = Q_tile * (K_tile)^T 有多大
 constexpr int CTA_M = 128, CTA_N = 128, HD = 128, WG = 128;
+// 一个CTA内，1个生产者warpgroup(4个warp)，2个消费者warpgroup(2*4个warp)，
+//一共3个warpgroup，3个warpgroup共享smem，3个warpgroup之间通过mbarrier同步
 constexpr int NThreads = 3 * WG, NumCons = 2 * WG, NumProd = WG, WS_STAGES = 3;
 constexpr int KVSTRIDE = CTA_N * HD;            // one swizzled K/V tile (elems)
 
